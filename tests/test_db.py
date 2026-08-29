@@ -50,7 +50,7 @@ def test_schema_version_recorded(temp_db):
     """Test that schema version is recorded."""
     cursor = temp_db.execute("SELECT version FROM schema_version")
     version = cursor.fetchone()[0]
-    assert version == 4
+    assert version == 5
 
 
 def test_insert_migration(temp_db):

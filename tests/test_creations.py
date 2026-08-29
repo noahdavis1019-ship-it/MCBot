@@ -1,5 +1,6 @@
 """Tests for token creation tracking."""
 
+import json
 import tempfile
 import time
 from pathlib import Path
@@ -42,14 +43,14 @@ def test_insert_creation():
         assert row[5] == 1  # True as integer
 
 
-def test_insert_creation_unique_mint():
-    """Test that mint is unique in creations table."""
+def test_insert_creation_duplicate_mint():
+    """Test that duplicate mints are stored and flagged."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
         db = init_db(db_path)
 
         # Insert first creation
-        insert_creation(
+        id1 = insert_creation(
             conn=db,
             mint="duplicate_mint",
             signature="sig1",
@@ -57,18 +58,31 @@ def test_insert_creation_unique_mint():
             raw_payload='{}',
         )
 
-        # Try to insert duplicate mint - should fail
-        try:
-            insert_creation(
-                conn=db,
-                mint="duplicate_mint",
-                signature="sig2",
-                recv_ts_utc="2026-08-29T12:01:00+00:00",
-                raw_payload='{}',
-            )
-            assert False, "Expected UNIQUE constraint to fail"
-        except Exception as e:
-            assert "UNIQUE" in str(e)
+        # Insert duplicate mint - should succeed and be flagged
+        id2 = insert_creation(
+            conn=db,
+            mint="duplicate_mint",
+            signature="sig2",
+            recv_ts_utc="2026-08-29T12:01:00+00:00",
+            raw_payload='{}',
+        )
+
+        # Both inserts should succeed
+        assert id1 > 0
+        assert id2 > 0
+        assert id2 != id1
+
+        # Verify first frame is NOT flagged
+        cursor = db.execute("SELECT duplicate_of_mint_seen FROM creations WHERE id = ?", (id1,))
+        assert cursor.fetchone()[0] == 0
+
+        # Verify second frame IS flagged
+        cursor = db.execute("SELECT duplicate_of_mint_seen FROM creations WHERE id = ?", (id2,))
+        assert cursor.fetchone()[0] == 1
+
+        # Verify both rows exist
+        cursor = db.execute("SELECT COUNT(*) FROM creations WHERE mint = 'duplicate_mint'")
+        assert cursor.fetchone()[0] == 2
 
 
 def test_token_lifecycle_view():
@@ -210,3 +224,62 @@ def test_trader_index_exists():
             WHERE type='index' AND name='idx_creations_trader'
         """)
         assert cursor.fetchone() is not None
+
+
+def test_fixture_replay_duplicates():
+    """Replay full fixture to verify duplicate detection: 525 rows, 523 distinct mints, 2 flagged."""
+    fixture_path = Path(__file__).parent / "fixtures" / "pumpportal_raw.jsonl"
+
+    if not fixture_path.exists():
+        # Skip if fixture not present (it's recorded separately)
+        print(f"Skipping: fixture not found at {fixture_path}")
+        return
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = init_db(db_path)
+
+        # Parse and insert all create frames from fixture
+        create_count = 0
+        with open(fixture_path) as f:
+            for line in f:
+                # Fixture format: {"received_ts": "...", "frame": "{...}"}
+                record = json.loads(line.strip())
+                frame = json.loads(record["frame"])
+
+                if frame.get("txType") == "create":
+                    insert_creation(
+                        conn=db,
+                        mint=frame.get("mint", ""),
+                        signature=frame.get("signature", ""),
+                        recv_ts_utc=record.get("received_ts", ""),
+                        raw_payload=record["frame"],  # Store the inner frame JSON string
+                        name=frame.get("name"),
+                        symbol=frame.get("symbol"),
+                        uri=frame.get("uri"),
+                        bonding_curve_key=frame.get("bondingCurveKey"),
+                        trader_public_key=frame.get("traderPublicKey"),
+                        initial_buy=frame.get("initialBuy"),
+                        sol_amount=frame.get("solAmount"),
+                        market_cap_sol=frame.get("marketCapSol"),
+                        v_sol_in_bonding_curve=frame.get("vSolInBondingCurve"),
+                        v_tokens_in_bonding_curve=frame.get("vTokensInBondingCurve"),
+                        pool=frame.get("pool"),
+                        is_mayhem_mode=frame.get("is_mayhem_mode"),
+                    )
+                    create_count += 1
+
+        # Verify expected counts
+        cursor = db.execute("SELECT COUNT(*) FROM creations")
+        total_rows = cursor.fetchone()[0]
+
+        cursor = db.execute("SELECT COUNT(DISTINCT mint) FROM creations")
+        distinct_mints = cursor.fetchone()[0]
+
+        cursor = db.execute("SELECT COUNT(*) FROM creations WHERE duplicate_of_mint_seen = 1")
+        flagged_count = cursor.fetchone()[0]
+
+        # Assert fixture reality: 525 create frames, 523 distinct mints, 2 duplicates
+        assert total_rows == 525, f"Expected 525 rows, got {total_rows}"
+        assert distinct_mints == 523, f"Expected 523 distinct mints, got {distinct_mints}"
+        assert flagged_count == 2, f"Expected 2 flagged duplicates, got {flagged_count}"

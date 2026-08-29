@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mcbot.timeutil import utcnow_iso
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -17,7 +17,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- Token creation events from PumpPortal (the unfiltered universe)
 CREATE TABLE IF NOT EXISTS creations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    mint TEXT NOT NULL UNIQUE,
+    mint TEXT NOT NULL,
     signature TEXT NOT NULL,
     name TEXT,
     symbol TEXT,
@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS creations (
     v_tokens_in_bonding_curve REAL,
     pool TEXT,
     is_mayhem_mode INTEGER,
+    duplicate_of_mint_seen INTEGER DEFAULT 0,
     recv_ts_utc TEXT NOT NULL,
     block_ts_utc TEXT,
     raw_payload TEXT NOT NULL,
@@ -231,9 +232,12 @@ def insert_creation(
 ) -> int:
     """Insert a token creation event.
 
+    Records all create frames (including duplicates from feed).
+    Sets duplicate_of_mint_seen=1 if mint already exists.
+
     Args:
         conn: SQLite connection
-        mint: Token mint address (unique)
+        mint: Token mint address
         signature: Transaction signature
         recv_ts_utc: When frame was received (ISO 8601 UTC)
         raw_payload: Full JSON payload as string
@@ -249,25 +253,31 @@ def insert_creation(
         v_tokens_in_bonding_curve: Virtual tokens in bonding curve
         pool: Pool identifier
         is_mayhem_mode: Mayhem mode flag
-        block_ts_utc: Block timestamp from chain (optional, for TASK 4)
+        block_ts_utc: Block timestamp from chain (optional)
 
     Returns:
         Row ID of inserted creation
     """
+    # Check if mint already exists
+    cursor = conn.execute("SELECT 1 FROM creations WHERE mint = ? LIMIT 1", (mint,))
+    is_duplicate = cursor.fetchone() is not None
+
     cursor = conn.execute(
         """
         INSERT INTO creations (
             mint, signature, name, symbol, uri, bonding_curve_key,
             trader_public_key, initial_buy, sol_amount, market_cap_sol,
             v_sol_in_bonding_curve, v_tokens_in_bonding_curve, pool,
-            is_mayhem_mode, recv_ts_utc, block_ts_utc, raw_payload, collected_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            is_mayhem_mode, duplicate_of_mint_seen, recv_ts_utc, block_ts_utc,
+            raw_payload, collected_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             mint, signature, name, symbol, uri, bonding_curve_key,
             trader_public_key, initial_buy, sol_amount, market_cap_sol,
             v_sol_in_bonding_curve, v_tokens_in_bonding_curve, pool,
             1 if is_mayhem_mode else 0 if is_mayhem_mode is not None else None,
+            1 if is_duplicate else 0,
             recv_ts_utc, block_ts_utc, raw_payload, utcnow_iso()
         )
     )
