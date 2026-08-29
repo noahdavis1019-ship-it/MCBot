@@ -35,6 +35,28 @@ Records pump.fun token migration events from PumpPortal websocket.
 - `symbol` and `pool` may be NULL if missing in payload
 - `migration_ts_utc` comes from payload, `collected_at_utc` is system clock
 
+**Multi-Launchpad Universe (Critical Finding)**:
+
+Based on analysis of `tests/fixtures/pumpportal_raw.jsonl` (546 frames, mtime: 2026-08-29 06:48:42):
+- **Creation pools observed**: `pump` (523), `bonk` (2)
+- **Migration pools observed**: `pump-amm` (18)
+- **Creation events**: 525 total
+- **Migration events**: 18 total
+
+This reveals that:
+1. **The creation universe spans multiple launchpads** - not just pump.fun
+2. **The migration universe is pump-amm only** - in this sample
+3. **Creation pool ≠ migration pool** - these are distinct event types from different launchpad systems
+
+**Implications for Analysis**:
+- Do NOT compute aggregate migration/creation conversion rates without per-pool breakdowns
+- **Open question**: Do `bonk` graduations appear in `subscribeMigration` at all, or only pump.fun graduations?
+- The 24-hour report MUST include:
+  - Creations by pool: `{pool: count}`
+  - Migrations by pool: `{pool: count}`
+  - Conversion rate per pool: `migrations[pool] / creations[pool]`
+- Treating this as a homogeneous population would be a methodological error
+
 ### observations
 
 Records price/liquidity/volume observations at scheduled horizons after migration.
@@ -98,12 +120,13 @@ Records Jupiter quote API calls for execution cost estimation.
 - `idx_quote_probes_direction` on `direction`
 
 **Notes**:
-- Sampled: Only 25% of migrations get probes (random seeded selection)
+- Sampled: 100% of migrations get probes (changed from 25% in schema v6)
 - Bidirectional: For each sampled mint, both SOL→TOKEN and TOKEN→SOL are queried
 - Horizons: Probes at t+1m, 5m, 15m, 1h after migration
 - `in_amount_lamports`: Always 100000000 (0.1 SOL) for SOL→TOKEN direction
 - Round-trip cost: For a pair (SOL→TOKEN, TOKEN→SOL), calculate `1 - (final_SOL / initial_SOL)`
 - Failure: `http_status >= 400`, `out_amount` and related fields NULL
+- Sample rate is recorded in `config` table with timestamp for historical tracking
 
 ## Derived Metrics
 
