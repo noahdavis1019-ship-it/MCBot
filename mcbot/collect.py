@@ -9,10 +9,11 @@ from pathlib import Path
 
 from mcbot.collector import MigrationCollector
 from mcbot.db import init_db, insert_heartbeat, insert_migration
+from mcbot.helius import get_block_time
 from mcbot.probe import QuoteProber
 from mcbot.ratelimit import RateLimiter
 from mcbot.scheduler import ObservationScheduler
-from mcbot.timeutil import utcnow_iso
+from mcbot.timeutil import ts_to_utc_iso, utcnow_iso
 
 
 class JSONFormatter(logging.Formatter):
@@ -78,21 +79,22 @@ class Collector:
         self.prober = QuoteProber(self.db, self.rate_limiter)
         self.ws_collector = MigrationCollector(self._on_migration, self.db)
 
-    def _on_migration(self, payload: dict) -> None:
+    async def _on_migration(self, payload: dict) -> None:
         """Handle migration event from websocket.
 
         Args:
             payload: Migration event dict with fields:
                 - mint: Token mint address
                 - pool: Pool identifier (e.g., "pump-amm")
-                - migration_ts_utc: ISO 8601 UTC timestamp
-                - signature: Transaction signature (for raw_payload)
+                - migration_ts_utc: ISO 8601 UTC timestamp (client-side)
+                - signature: Transaction signature (for chain anchoring)
         """
         try:
             # Extract fields from observed migration schema
             mint = payload.get("mint")
             pool = payload.get("pool")
             migration_ts_utc = payload.get("migration_ts_utc")
+            signature = payload.get("signature")
 
             if not mint:
                 self.logger.warning("Migration missing mint", extra={"payload": payload})
@@ -101,6 +103,29 @@ class Collector:
             if not migration_ts_utc:
                 self.logger.warning("Migration missing timestamp", extra={"payload": payload})
                 return
+
+            # Fetch chain-anchored blockTime from Helius
+            block_ts_utc = None
+            if signature:
+                try:
+                    block_time = await get_block_time(signature)
+                    if block_time:
+                        block_ts_utc = ts_to_utc_iso(block_time)
+                        self.logger.debug(
+                            "Fetched blockTime",
+                            extra={"signature": signature, "block_ts_utc": block_ts_utc}
+                        )
+                except ValueError as e:
+                    # Missing HELIUS_API_KEY
+                    self.logger.warning(
+                        "Helius API not configured",
+                        extra={"error": str(e)}
+                    )
+                except Exception as e:
+                    self.logger.error(
+                        "Failed to fetch blockTime",
+                        extra={"signature": signature, "error": str(e)}
+                    )
 
             # Insert migration into database
             # Note: symbol is None - migration frames don't include token metadata
@@ -111,6 +136,8 @@ class Collector:
                 pool=pool,
                 migration_ts_utc=migration_ts_utc,
                 raw_payload=json.dumps(payload),
+                signature=signature,
+                block_ts_utc=block_ts_utc,
             )
 
             self.logger.info(
@@ -118,7 +145,9 @@ class Collector:
                 extra={
                     "mint": mint,
                     "pool": pool,
-                    "timestamp": migration_ts_utc,
+                    "migration_ts_utc": migration_ts_utc,
+                    "block_ts_utc": block_ts_utc,
+                    "has_chain_anchor": block_ts_utc is not None,
                 }
             )
 

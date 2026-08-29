@@ -50,7 +50,7 @@ def test_schema_version_recorded(temp_db):
     """Test that schema version is recorded."""
     cursor = temp_db.execute("SELECT version FROM schema_version")
     version = cursor.fetchone()[0]
-    assert version == 3
+    assert version == 4
 
 
 def test_insert_migration(temp_db):
@@ -66,16 +66,21 @@ def test_insert_migration(temp_db):
 
     assert row_id > 0
 
-    # Verify data
-    cursor = temp_db.execute("SELECT * FROM migrations WHERE id = ?", (row_id,))
+    # Verify data (use named columns to avoid brittleness from schema changes)
+    cursor = temp_db.execute(
+        "SELECT mint, signature, symbol, pool, migration_ts_utc, block_ts_utc, source, raw_payload FROM migrations WHERE id = ?",
+        (row_id,)
+    )
     row = cursor.fetchone()
 
-    assert row[1] == "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"  # mint
+    assert row[0] == "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"  # mint
+    assert row[1] is None  # signature (not provided)
     assert row[2] == "PUMP"  # symbol
     assert row[3] == "PoolAddress123"  # pool
     assert row[4] == "2026-08-29T12:00:00"  # migration_ts_utc
-    assert row[5] == "pumpportal"  # source
-    assert "mint" in row[6]  # raw_payload
+    assert row[5] is None  # block_ts_utc (not provided)
+    assert row[6] == "pumpportal"  # source
+    assert "mint" in row[7]  # raw_payload
 
 
 def test_insert_migration_nullable_fields(temp_db):

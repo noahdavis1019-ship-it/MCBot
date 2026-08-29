@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mcbot.timeutil import utcnow_iso
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -45,9 +45,11 @@ CREATE INDEX IF NOT EXISTS idx_creations_recv_ts ON creations(recv_ts_utc);
 CREATE TABLE IF NOT EXISTS migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mint TEXT NOT NULL,
+    signature TEXT,
     symbol TEXT,
     pool TEXT,
     migration_ts_utc TEXT NOT NULL,
+    block_ts_utc TEXT,
     source TEXT NOT NULL DEFAULT 'pumpportal',
     raw_payload TEXT NOT NULL,
     collected_at_utc TEXT NOT NULL
@@ -55,6 +57,7 @@ CREATE TABLE IF NOT EXISTS migrations (
 
 CREATE INDEX IF NOT EXISTS idx_migrations_mint ON migrations(mint);
 CREATE INDEX IF NOT EXISTS idx_migrations_ts ON migrations(migration_ts_utc);
+CREATE INDEX IF NOT EXISTS idx_migrations_signature ON migrations(signature);
 
 -- Price/liquidity observations at scheduled horizons
 CREATE TABLE IF NOT EXISTS observations (
@@ -177,6 +180,8 @@ def insert_migration(
     pool: str | None,
     migration_ts_utc: str,
     raw_payload: str,
+    signature: str | None = None,
+    block_ts_utc: str | None = None,
 ) -> int:
     """Insert a migration event.
 
@@ -185,18 +190,20 @@ def insert_migration(
         mint: Token mint address
         symbol: Token symbol/ticker (may be None)
         pool: Raydium pool address (may be None)
-        migration_ts_utc: Migration timestamp from payload
+        migration_ts_utc: Migration timestamp from payload (client-side)
         raw_payload: Full JSON payload as string
+        signature: Transaction signature (for chain anchoring)
+        block_ts_utc: Chain-anchored block timestamp from Helius (ISO 8601 UTC)
 
     Returns:
         Row ID of inserted migration
     """
     cursor = conn.execute(
         """
-        INSERT INTO migrations (mint, symbol, pool, migration_ts_utc, raw_payload, collected_at_utc)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO migrations (mint, signature, symbol, pool, migration_ts_utc, block_ts_utc, raw_payload, collected_at_utc)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (mint, symbol, pool, migration_ts_utc, raw_payload, utcnow_iso())
+        (mint, signature, symbol, pool, migration_ts_utc, block_ts_utc, raw_payload, utcnow_iso())
     )
     conn.commit()
     return cursor.lastrowid

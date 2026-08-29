@@ -174,7 +174,10 @@ class MigrationCollector:
                 "pool": data["pool"],
                 "migration_ts_utc": received_ts,
             }
-            self.on_migration(migration_data)
+            # Support both sync and async callbacks
+            result = self.on_migration(migration_data)
+            if asyncio.iscoroutine(result):
+                await result
             logger.info(
                 "Migration detected",
                 extra={"mint": data["mint"], "pool": data["pool"]}
