@@ -76,7 +76,7 @@ class Collector:
         self.rate_limiter = RateLimiter()
         self.scheduler = ObservationScheduler(self.db, self.rate_limiter)
         self.prober = QuoteProber(self.db, self.rate_limiter)
-        self.ws_collector = MigrationCollector(self._on_migration)
+        self.ws_collector = MigrationCollector(self._on_migration, self.db)
 
     def _on_migration(self, payload: dict) -> None:
         """Handle migration event from websocket.

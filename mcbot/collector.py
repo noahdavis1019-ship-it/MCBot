@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import sqlite3
 from collections.abc import Callable
 
 import websockets
@@ -21,16 +22,19 @@ class MigrationCollector:
     NEVER opens concurrent connections (PumpPortal bans for this).
     """
 
-    def __init__(self, on_migration: Callable[[dict], None]):
+    def __init__(self, on_migration: Callable[[dict], None], db: sqlite3.Connection | None = None):
         """Initialize collector.
 
         Args:
             on_migration: Callback function called for each migration event
+            db: SQLite connection for parse failure logging (optional)
         """
         self.on_migration = on_migration
+        self.db = db
         self._ws = None
         self._running = False
         self._reconnect_delay = 1.0
+        self._ignored_frame_count = 0
 
         # Load API key from environment (optional - will test keyless connection)
         load_dotenv()
@@ -53,6 +57,16 @@ class MigrationCollector:
         self._running = False
         if self._ws:
             await self._ws.close()
+
+    def get_and_reset_ignored_count(self) -> int:
+        """Get count of ignored frames since last call and reset counter.
+
+        Returns:
+            Number of known-ignored frames (creates, subscription messages) received
+        """
+        count = self._ignored_frame_count
+        self._ignored_frame_count = 0
+        return count
 
     async def _connect_and_listen(self) -> None:
         """Connect to websocket and listen for messages."""
@@ -92,7 +106,12 @@ class MigrationCollector:
                     )
 
     async def _handle_message(self, message: str) -> None:
-        """Parse and handle incoming websocket message.
+        """Parse and handle incoming websocket message with three-way routing.
+
+        Routes:
+            1. MIGRATION (txType="migrate") → on_migration callback
+            2. KNOWN_IGNORED (creates, subscription messages) → increment counter
+            3. UNKNOWN → insert parse_failure row
 
         Args:
             message: Raw websocket message string
@@ -102,23 +121,35 @@ class MigrationCollector:
 
         received_ts = utcnow_iso()
 
+        # Parse JSON
         try:
             data = json.loads(message)
         except json.JSONDecodeError as e:
             logger.error("Invalid JSON", extra={"error": str(e), "raw_frame": message[:200]})
-            # This shouldn't have a db connection here yet, but will after recording
-            # For now just log and return
+            if self.db:
+                insert_parse_failure(
+                    conn=self.db,
+                    received_ts=received_ts,
+                    raw_frame=message,
+                    reason=f"JSON decode error: {e}",
+                )
             return
 
         # Validate message structure
         if not isinstance(data, dict):
             logger.warning("Non-dict message", extra={"raw_frame": message[:200]})
+            if self.db:
+                insert_parse_failure(
+                    conn=self.db,
+                    received_ts=received_ts,
+                    raw_frame=message,
+                    reason="Message is not a dict",
+                )
             return
 
-        # Filter for migration events based on observed schema
-        # Observed migration frame: {"signature": str, "mint": str, "txType": "migrate", "pool": str}
+        # ROUTE 1: MIGRATION
+        # Observed schema: {"signature": str, "mint": str, "txType": "migrate", "pool": str}
         if data.get("txType") == "migrate":
-            # Validate required fields
             required_fields = ["signature", "mint", "pool"]
             missing_fields = [f for f in required_fields if f not in data]
 
@@ -127,24 +158,58 @@ class MigrationCollector:
                     "Migration frame missing fields",
                     extra={"missing": missing_fields, "raw_frame": message[:200]}
                 )
+                if self.db:
+                    insert_parse_failure(
+                        conn=self.db,
+                        received_ts=received_ts,
+                        raw_frame=message,
+                        reason=f"Migration missing fields: {missing_fields}",
+                    )
                 return
 
-            # Valid migration - extract timestamp and route to callback
+            # Valid migration - route to callback
             migration_data = {
                 "signature": data["signature"],
                 "mint": data["mint"],
                 "pool": data["pool"],
-                "migration_ts_utc": received_ts,  # Use receive time as migration timestamp
+                "migration_ts_utc": received_ts,
             }
             self.on_migration(migration_data)
             logger.info(
                 "Migration detected",
                 extra={"mint": data["mint"], "pool": data["pool"]}
             )
-        else:
-            # Non-migration frame (token create, subscription confirm, etc.) - filter silently
-            tx_type = data.get("txType", data.get("message", "unknown"))
-            logger.debug("Non-migration frame filtered", extra={"type": tx_type})
+            return
+
+        # ROUTE 2: KNOWN_IGNORED
+        # Token creates (txType="create")
+        if data.get("txType") == "create":
+            self._ignored_frame_count += 1
+            logger.debug("Token create frame ignored")
+            return
+
+        # Subscription confirmations ({"message": "Successfully subscribed..."})
+        if "message" in data and isinstance(data["message"], str):
+            self._ignored_frame_count += 1
+            logger.debug("Subscription message ignored", extra={"msg": data["message"]})
+            return
+
+        # Error/warning messages ({"errors": "Invalid API key..."})
+        if "errors" in data:
+            self._ignored_frame_count += 1
+            logger.debug("Error/warning frame ignored", extra={"errors": data["errors"]})
+            return
+
+        # ROUTE 3: UNKNOWN
+        # Unrecognized frame structure - record as parse failure
+        logger.warning("Unknown frame structure", extra={"raw_frame": message[:200]})
+        if self.db:
+            insert_parse_failure(
+                conn=self.db,
+                received_ts=received_ts,
+                raw_frame=message,
+                reason="Unknown frame structure (not migration, create, or control message)",
+            )
 
     async def _backoff(self) -> None:
         """Wait with exponential backoff before reconnecting."""
