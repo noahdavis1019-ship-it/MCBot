@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mcbot.timeutil import utcnow_iso
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -14,7 +14,34 @@ CREATE TABLE IF NOT EXISTS schema_version (
     applied_at_utc TEXT NOT NULL
 );
 
--- Migration events from PumpPortal
+-- Token creation events from PumpPortal (the unfiltered universe)
+CREATE TABLE IF NOT EXISTS creations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT NOT NULL UNIQUE,
+    signature TEXT NOT NULL,
+    name TEXT,
+    symbol TEXT,
+    uri TEXT,
+    bonding_curve_key TEXT,
+    trader_public_key TEXT,
+    initial_buy REAL,
+    sol_amount REAL,
+    market_cap_sol REAL,
+    v_sol_in_bonding_curve REAL,
+    v_tokens_in_bonding_curve REAL,
+    pool TEXT,
+    is_mayhem_mode INTEGER,
+    recv_ts_utc TEXT NOT NULL,
+    block_ts_utc TEXT,
+    raw_payload TEXT NOT NULL,
+    collected_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_creations_mint ON creations(mint);
+CREATE INDEX IF NOT EXISTS idx_creations_trader ON creations(trader_public_key);
+CREATE INDEX IF NOT EXISTS idx_creations_recv_ts ON creations(recv_ts_utc);
+
+-- Migration events from PumpPortal (subset that reached Raydium)
 CREATE TABLE IF NOT EXISTS migrations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     mint TEXT NOT NULL,
@@ -89,6 +116,27 @@ CREATE TABLE IF NOT EXISTS parse_failures (
 );
 
 CREATE INDEX IF NOT EXISTS idx_parse_failures_ts ON parse_failures(received_ts);
+
+-- Token lifecycle view: joins creations to migrations
+CREATE VIEW IF NOT EXISTS token_lifecycle AS
+SELECT
+    c.mint,
+    c.name,
+    c.symbol,
+    c.trader_public_key,
+    c.recv_ts_utc AS created_ts_utc,
+    c.block_ts_utc AS created_block_ts_utc,
+    m.migration_ts_utc AS migrated_ts_utc,
+    CASE
+        WHEN m.migration_ts_utc IS NOT NULL THEN
+            CAST((julianday(m.migration_ts_utc) - julianday(c.recv_ts_utc)) * 86400 AS INTEGER)
+        ELSE NULL
+    END AS seconds_to_migration,
+    c.market_cap_sol,
+    c.pool AS creation_pool,
+    m.pool AS migration_pool
+FROM creations c
+LEFT JOIN migrations m ON c.mint = m.mint;
 """
 
 
@@ -149,6 +197,72 @@ def insert_migration(
         VALUES (?, ?, ?, ?, ?, ?)
         """,
         (mint, symbol, pool, migration_ts_utc, raw_payload, utcnow_iso())
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def insert_creation(
+    conn: sqlite3.Connection,
+    mint: str,
+    signature: str,
+    recv_ts_utc: str,
+    raw_payload: str,
+    name: str | None = None,
+    symbol: str | None = None,
+    uri: str | None = None,
+    bonding_curve_key: str | None = None,
+    trader_public_key: str | None = None,
+    initial_buy: float | None = None,
+    sol_amount: float | None = None,
+    market_cap_sol: float | None = None,
+    v_sol_in_bonding_curve: float | None = None,
+    v_tokens_in_bonding_curve: float | None = None,
+    pool: str | None = None,
+    is_mayhem_mode: bool | None = None,
+    block_ts_utc: str | None = None,
+) -> int:
+    """Insert a token creation event.
+
+    Args:
+        conn: SQLite connection
+        mint: Token mint address (unique)
+        signature: Transaction signature
+        recv_ts_utc: When frame was received (ISO 8601 UTC)
+        raw_payload: Full JSON payload as string
+        name: Token name
+        symbol: Token symbol/ticker
+        uri: Token metadata URI
+        bonding_curve_key: Bonding curve address
+        trader_public_key: Creator wallet address
+        initial_buy: Initial buy amount
+        sol_amount: SOL amount in transaction
+        market_cap_sol: Market cap in SOL
+        v_sol_in_bonding_curve: Virtual SOL in bonding curve
+        v_tokens_in_bonding_curve: Virtual tokens in bonding curve
+        pool: Pool identifier
+        is_mayhem_mode: Mayhem mode flag
+        block_ts_utc: Block timestamp from chain (optional, for TASK 4)
+
+    Returns:
+        Row ID of inserted creation
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO creations (
+            mint, signature, name, symbol, uri, bonding_curve_key,
+            trader_public_key, initial_buy, sol_amount, market_cap_sol,
+            v_sol_in_bonding_curve, v_tokens_in_bonding_curve, pool,
+            is_mayhem_mode, recv_ts_utc, block_ts_utc, raw_payload, collected_at_utc
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            mint, signature, name, symbol, uri, bonding_curve_key,
+            trader_public_key, initial_buy, sol_amount, market_cap_sol,
+            v_sol_in_bonding_curve, v_tokens_in_bonding_curve, pool,
+            1 if is_mayhem_mode else 0 if is_mayhem_mode is not None else None,
+            recv_ts_utc, block_ts_utc, raw_payload, utcnow_iso()
+        )
     )
     conn.commit()
     return cursor.lastrowid

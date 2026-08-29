@@ -106,3 +106,69 @@ Acceptance gate for 24h run:
 
 ✅ **Implemented** (2026-08-29)
 ⏳ **Acceptance test pending**
+
+---
+
+## Token Creates: The Unfiltered Universe
+
+**Date:** 2026-08-29
+**Context:** Recording all token creation events from PumpPortal
+
+### Decision
+
+The `creations` table records **all token creation events** (txType="create") from PumpPortal websocket. This is the **unfiltered universe** of tokens.
+
+The `migrations` table records the **subset** of tokens that successfully migrated to Raydium (txType="migrate").
+
+### Rationale
+
+**Purpose:**
+- `creations` = universe of all tokens launched (~25,000/day)
+- `migrations` = subset that reached Raydium (~115/day, ~0.46% migration rate)
+- `token_lifecycle` VIEW = join showing time-to-migration for successful tokens
+
+**Why record all creates:**
+1. **Context for migration analysis** - Understanding the denominator (total launches) provides context for the numerator (successful migrations)
+2. **Trader pattern analysis** - traderPublicKey field enables future analysis of prolific token creators
+3. **Historical completeness** - Capturing the full universe enables retroactive analysis without re-collecting
+
+**What we don't do:**
+- ❌ No scoring/ranking of traders at write time
+- ❌ No filtering of creates by quality signals
+- ❌ No deduplication beyond UNIQUE(mint)
+
+**Volume:**
+- Expected: ~25,000 creates/day (~17.4/min)
+- Measured throughput: **0.05ms per insert, 21,591 inserts/sec**
+- Storage: ~1 month = ~750K rows (~50-100 MB with JSON payloads)
+
+### Schema
+
+```sql
+CREATE TABLE creations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mint TEXT NOT NULL UNIQUE,
+    signature TEXT NOT NULL,
+    name TEXT,
+    symbol TEXT,
+    trader_public_key TEXT,
+    market_cap_sol REAL,
+    -- ... 15 fields total
+    recv_ts_utc TEXT NOT NULL,
+    raw_payload TEXT NOT NULL
+);
+
+CREATE INDEX idx_creations_mint ON creations(mint);
+CREATE INDEX idx_creations_trader ON creations(trader_public_key);
+CREATE INDEX idx_creations_recv_ts ON creations(recv_ts_utc);
+```
+
+### Test Coverage
+
+**Test:** `tests/test_creations.py::test_creation_volume_throughput`
+
+Validates SQLite write throughput at expected daily volume (500 inserts simulating 30-min sample).
+
+### Status
+
+✅ **Implemented** (2026-08-29)

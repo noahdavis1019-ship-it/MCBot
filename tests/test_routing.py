@@ -34,25 +34,42 @@ def test_route_migration():
 
 
 def test_route_token_create():
-    """Test ROUTE 2: Token create frames increment ignored counter."""
+    """Test ROUTE 2: Token create frames increment ignored counter AND insert to DB."""
     # Real create frame from fixture
-    create_frame = '{"txType":"create","signature":"xyz","mint":"test_mint","name":"Test Token","symbol":"TEST"}'
+    create_frame = '{"txType":"create","signature":"xyz","mint":"test_mint","name":"Test Token","symbol":"TEST","traderPublicKey":"trader123"}'
 
     migrations_received = []
 
     def on_migration(payload: dict) -> None:
         migrations_received.append(payload)
 
-    collector = MigrationCollector(on_migration)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = init_db(db_path)
 
-    # Process the frame
-    asyncio.run(collector._handle_message(create_frame))
+        collector = MigrationCollector(on_migration, db)
 
-    # Assert not routed to migration callback
-    assert len(migrations_received) == 0
+        # Process the frame
+        asyncio.run(collector._handle_message(create_frame))
 
-    # Assert counted as ignored
-    assert collector.get_and_reset_ignored_count() == 1
+        # Assert not routed to migration callback
+        assert len(migrations_received) == 0
+
+        # Assert counted as ignored (keeps counter for heartbeat monitoring)
+        assert collector.get_and_reset_ignored_count() == 1
+
+        # Assert creation row was inserted
+        cursor = db.execute("SELECT COUNT(*) FROM creations")
+        count = cursor.fetchone()[0]
+        assert count == 1
+
+        # Verify the creation data
+        cursor = db.execute("SELECT mint, name, symbol, trader_public_key FROM creations")
+        row = cursor.fetchone()
+        assert row[0] == "test_mint"
+        assert row[1] == "Test Token"
+        assert row[2] == "TEST"
+        assert row[3] == "trader123"
 
 
 def test_route_subscription_message():

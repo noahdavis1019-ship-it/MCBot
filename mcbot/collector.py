@@ -181,11 +181,41 @@ class MigrationCollector:
             )
             return
 
-        # ROUTE 2: KNOWN_IGNORED
-        # Token creates (txType="create")
+        # ROUTE 2: TOKEN CREATES
+        # Observed schema: {bondingCurveKey, initialBuy, is_mayhem_mode, marketCapSol,
+        #                   mint, name, pool, signature, solAmount, symbol, traderPublicKey,
+        #                   txType, uri, vSolInBondingCurve, vTokensInBondingCurve}
         if data.get("txType") == "create":
+            from mcbot.db import insert_creation
+
+            # Increment counter for heartbeat (keep this for monitoring)
             self._ignored_frame_count += 1
-            logger.debug("Token create frame ignored")
+
+            # Insert creation into database
+            if self.db:
+                try:
+                    insert_creation(
+                        conn=self.db,
+                        mint=data.get("mint"),
+                        signature=data.get("signature"),
+                        recv_ts_utc=received_ts,
+                        raw_payload=message,
+                        name=data.get("name"),
+                        symbol=data.get("symbol"),
+                        uri=data.get("uri"),
+                        bonding_curve_key=data.get("bondingCurveKey"),
+                        trader_public_key=data.get("traderPublicKey"),
+                        initial_buy=data.get("initialBuy"),
+                        sol_amount=data.get("solAmount"),
+                        market_cap_sol=data.get("marketCapSol"),
+                        v_sol_in_bonding_curve=data.get("vSolInBondingCurve"),
+                        v_tokens_in_bonding_curve=data.get("vTokensInBondingCurve"),
+                        pool=data.get("pool"),
+                        is_mayhem_mode=data.get("is_mayhem_mode"),
+                    )
+                    logger.debug("Token creation recorded", extra={"mint": data.get("mint")})
+                except Exception as e:
+                    logger.error("Failed to insert creation", extra={"error": str(e), "mint": data.get("mint")})
             return
 
         # Subscription confirmations ({"message": "Successfully subscribed..."})
