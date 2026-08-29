@@ -56,89 +56,91 @@ def test_scheduled_observation_ordering():
 
 def test_schedule_observations_creates_all_horizons():
     """Test that scheduler creates observations for all horizons."""
+    import tempfile
+    from pathlib import Path
+
+    from mcbot.db import init_db
     from mcbot.ratelimit import RateLimiter
-
-    # Mock database
-    class MockDB:
-        def insert_observation(self, **kwargs):
-            return 1
-
-    db = MockDB()
-    rate_limiter = RateLimiter()
-
     from mcbot.scheduler import ObservationScheduler
 
-    scheduler = ObservationScheduler(db, rate_limiter)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = init_db(db_path)
+        rate_limiter = RateLimiter()
 
-    # Schedule observations
-    migration_ts = "2026-08-29T12:00:00"
-    scheduler.schedule_observations("test_mint", migration_ts)
+        scheduler = ObservationScheduler(db, rate_limiter)
 
-    # Should have 7 observations scheduled
-    assert len(scheduler._queue) == 7
+        # Schedule observations
+        migration_ts = "2026-08-29T12:00:00"
+        scheduler.schedule_observations("test_mint", migration_ts)
 
-    # Check that all horizons are present
-    labels = [obs.horizon_label for obs in scheduler._queue]
-    assert set(labels) == {"1m", "5m", "15m", "30m", "1h", "4h", "24h"}
+        # Should have 7 observations scheduled
+        assert len(scheduler._queue) == 7
+
+        # Check that all horizons are present
+        labels = [obs.horizon_label for obs in scheduler._queue]
+        assert set(labels) == {"1m", "5m", "15m", "30m", "1h", "4h", "24h"}
 
 
 def test_schedule_observations_correct_timing():
     """Test that observations are scheduled at correct times."""
+    import tempfile
+    from pathlib import Path
+
+    from mcbot.db import init_db
     from mcbot.ratelimit import RateLimiter
-
-    class MockDB:
-        def insert_observation(self, **kwargs):
-            return 1
-
-    db = MockDB()
-    rate_limiter = RateLimiter()
-
     from mcbot.scheduler import ObservationScheduler
 
-    scheduler = ObservationScheduler(db, rate_limiter)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = init_db(db_path)
+        rate_limiter = RateLimiter()
 
-    # Schedule observations from a known timestamp
-    migration_ts = "2026-08-29T12:00:00+00:00"
-    base_time = datetime.fromisoformat(migration_ts)
+        scheduler = ObservationScheduler(db, rate_limiter)
 
-    scheduler.schedule_observations("test_mint", migration_ts)
+        # Schedule observations from a known timestamp
+        migration_ts = "2026-08-29T12:00:00+00:00"
+        base_time = datetime.fromisoformat(migration_ts)
 
-    # Check each observation's scheduled time
-    for obs in scheduler._queue:
-        if obs.horizon_label == "1m":
-            expected_ts = (base_time + timedelta(minutes=1)).timestamp()
-            assert abs(obs.scheduled_ts - expected_ts) < 1.0
-        elif obs.horizon_label == "5m":
-            expected_ts = (base_time + timedelta(minutes=5)).timestamp()
-            assert abs(obs.scheduled_ts - expected_ts) < 1.0
-        elif obs.horizon_label == "24h":
-            expected_ts = (base_time + timedelta(hours=24)).timestamp()
-            assert abs(obs.scheduled_ts - expected_ts) < 1.0
+        scheduler.schedule_observations("test_mint", migration_ts)
+
+        # Check each observation's scheduled time
+        for obs in scheduler._queue:
+            if obs.horizon_label == "1m":
+                expected_ts = (base_time + timedelta(minutes=1)).timestamp()
+                assert abs(obs.scheduled_ts - expected_ts) < 1.0
+            elif obs.horizon_label == "5m":
+                expected_ts = (base_time + timedelta(minutes=5)).timestamp()
+                assert abs(obs.scheduled_ts - expected_ts) < 1.0
+            elif obs.horizon_label == "24h":
+                expected_ts = (base_time + timedelta(hours=24)).timestamp()
+                assert abs(obs.scheduled_ts - expected_ts) < 1.0
 
 
 def test_schedule_handles_utc_timezone():
     """Test that scheduler correctly handles UTC timezone indicators."""
+    import tempfile
+    from pathlib import Path
+
+    from mcbot.db import init_db
     from mcbot.ratelimit import RateLimiter
-
-    class MockDB:
-        def insert_observation(self, **kwargs):
-            return 1
-
-    db = MockDB()
-    rate_limiter = RateLimiter()
-
     from mcbot.scheduler import ObservationScheduler
 
-    scheduler = ObservationScheduler(db, rate_limiter)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = init_db(db_path)
+        rate_limiter = RateLimiter()
 
-    # Test with different UTC formats
-    for migration_ts in [
-        "2026-08-29T12:00:00Z",
-        "2026-08-29T12:00:00+00:00",
-        "2026-08-29T12:00:00",
-    ]:
-        scheduler._queue = []  # Clear queue
-        scheduler.schedule_observations("test_mint", migration_ts)
+        scheduler = ObservationScheduler(db, rate_limiter)
 
-        # Should create 7 observations regardless of format
-        assert len(scheduler._queue) == 7
+        # Test with different UTC formats
+        for migration_ts in [
+            "2026-08-29T12:00:00Z",
+            "2026-08-29T12:00:00+00:00",
+            "2026-08-29T12:00:00",
+        ]:
+            scheduler._queue = []  # Clear queue
+            scheduler.schedule_observations("test_mint", migration_ts)
+
+            # Should create 7 observations regardless of format
+            assert len(scheduler._queue) == 7

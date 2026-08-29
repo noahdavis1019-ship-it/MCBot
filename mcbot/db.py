@@ -326,6 +326,146 @@ def insert_parse_failure(
     return cursor.lastrowid
 
 
+def update_observation_status(
+    conn: sqlite3.Connection,
+    observation_id: int,
+    actual_ts_utc: str,
+    obs_status: str,
+    price_usd: float | None = None,
+    price_native: float | None = None,
+    liquidity_usd: float | None = None,
+    fdv: float | None = None,
+    vol_5m: float | None = None,
+    vol_1h: float | None = None,
+    txns_buys_5m: int | None = None,
+    txns_sells_5m: int | None = None,
+    dex_id: str | None = None,
+    http_status: int | None = None,
+    request_latency_ms: int | None = None,
+    raw_payload: str | None = None,
+) -> None:
+    """Update observation status and data after execution.
+
+    This is the ONLY allowed UPDATE operation - transitioning from PENDING → final state.
+    Documented exception to append-only design for data loss prevention.
+
+    Args:
+        conn: SQLite connection
+        observation_id: Row ID of observation to update
+        actual_ts_utc: When observation was actually attempted
+        obs_status: Final status (OK | MISSED_LATE | HTTP_ERROR | PARSE_ERROR)
+        price_usd: Token price in USD
+        price_native: Token price in native (SOL)
+        liquidity_usd: Pool liquidity in USD
+        fdv: Fully diluted valuation
+        vol_5m: 5-minute volume
+        vol_1h: 1-hour volume
+        txns_buys_5m: Buy transaction count (5m)
+        txns_sells_5m: Sell transaction count (5m)
+        dex_id: DEX identifier
+        http_status: HTTP status code (real codes only, not sentinels)
+        request_latency_ms: Request latency in ms
+        raw_payload: Full JSON response as string
+    """
+    conn.execute(
+        """
+        UPDATE observations
+        SET actual_ts_utc = ?,
+            obs_status = ?,
+            price_usd = ?,
+            price_native = ?,
+            liquidity_usd = ?,
+            fdv = ?,
+            vol_5m = ?,
+            vol_1h = ?,
+            txns_buys_5m = ?,
+            txns_sells_5m = ?,
+            dex_id = ?,
+            http_status = ?,
+            request_latency_ms = ?,
+            raw_payload = ?
+        WHERE id = ?
+        """,
+        (
+            actual_ts_utc, obs_status,
+            price_usd, price_native, liquidity_usd, fdv,
+            vol_5m, vol_1h, txns_buys_5m, txns_sells_5m,
+            dex_id, http_status, request_latency_ms, raw_payload,
+            observation_id
+        )
+    )
+    conn.commit()
+
+
+def load_pending_observations(conn: sqlite3.Connection) -> list[dict]:
+    """Load all PENDING observations from database.
+
+    Returns list ordered by scheduled_ts_utc ascending (earliest first).
+
+    Args:
+        conn: SQLite connection
+
+    Returns:
+        List of dicts with fields:
+            - id: Observation row ID
+            - mint: Token mint address
+            - horizon_label: Horizon name
+            - scheduled_ts_utc: When observation should run (ISO 8601)
+            - migration_ts_utc: Migration timestamp (derived from first observation)
+    """
+    cursor = conn.execute(
+        """
+        SELECT id, mint, horizon_label, scheduled_ts_utc
+        FROM observations
+        WHERE obs_status = 'PENDING'
+        ORDER BY scheduled_ts_utc ASC
+        """
+    )
+
+    rows = cursor.fetchall()
+    return [
+        {
+            "id": row[0],
+            "mint": row[1],
+            "horizon_label": row[2],
+            "scheduled_ts_utc": row[3],
+        }
+        for row in rows
+    ]
+
+
+def expire_overdue_pending_observations(conn: sqlite3.Connection, cutoff_ts_utc: str) -> int:
+    """Mark PENDING observations that are >5 min overdue as MISSED_LATE.
+
+    This handles observations that were pending when collector was killed.
+
+    Args:
+        conn: SQLite connection
+        cutoff_ts_utc: ISO 8601 UTC timestamp - observations scheduled before this are expired
+
+    Returns:
+        Number of observations expired
+    """
+    from mcbot.timeutil import utcnow_iso
+
+    actual_ts_utc = utcnow_iso()
+
+    cursor = conn.execute(
+        """
+        UPDATE observations
+        SET actual_ts_utc = ?,
+            obs_status = 'MISSED_LATE',
+            raw_payload = 'Observation expired due to restart gap (>5 min overdue at startup)'
+        WHERE obs_status = 'PENDING'
+          AND scheduled_ts_utc < ?
+        """,
+        (actual_ts_utc, cutoff_ts_utc)
+    )
+
+    conn.commit()
+    return cursor.rowcount
+
+
 def get_coverage_report(conn: sqlite3.Connection, start_ts_utc: str | None = None, end_ts_utc: str | None = None) -> list[dict]:
     """Get hourly coverage report showing uptime and observation counts.
 
