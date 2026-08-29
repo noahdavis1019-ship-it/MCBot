@@ -89,13 +89,13 @@ class RateLimiter:
         """Initialize rate limiters for each API.
 
         DexScreener: ~60 requests/minute (1 per second with burst capacity)
-        Jupiter: 1 request/second (60 per minute with small burst)
+        Jupiter: 0.5 request/second (30 per minute keyless, with small burst)
         """
         # DexScreener: 1 req/sec, allow burst of 10
         self.dexscreener = TokenBucket(rate=1.0, capacity=10)
 
-        # Jupiter: 1 req/sec, allow burst of 5
-        self.jupiter = TokenBucket(rate=1.0, capacity=5)
+        # Jupiter: 0.5 req/sec (keyless), allow burst of 3
+        self.jupiter = TokenBucket(rate=0.5, capacity=3)
 
     async def acquire_dexscreener(self) -> None:
         """Acquire rate limit token for DexScreener API call."""

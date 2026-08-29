@@ -105,15 +105,28 @@ class MigrationCollector:
                         detail=f"has_api_key={bool(self._api_key)}",
                     )
 
-                # Subscribe to migration events only
-                subscribe_msg = {
+                # Subscribe to BOTH creation and migration events
+                # NOTE: Must use same connection - PumpPortal bans multiple connections
+                subscribe_creates = {
+                    "method": "subscribeNewToken"
+                }
+                await ws.send(json.dumps(subscribe_creates))
+                logger.info("Subscribed to token creation events")
+
+                subscribe_migrates = {
                     "method": "subscribeMigration"
                 }
-                await ws.send(json.dumps(subscribe_msg))
+                await ws.send(json.dumps(subscribe_migrates))
                 logger.info("Subscribed to migration events")
 
-                # Log subscription event
+                # Log both subscription events
                 if self.db:
+                    insert_connection_event(
+                        conn=self.db,
+                        ts_utc=utcnow_iso(),
+                        event="SUBSCRIBED",
+                        detail="subscribeNewToken",
+                    )
                     insert_connection_event(
                         conn=self.db,
                         ts_utc=utcnow_iso(),

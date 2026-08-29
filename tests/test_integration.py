@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import sqlite3
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -199,3 +200,78 @@ async def test_collector_reconnect_backoff():
 
     assert sleep_delays == expected_delays
     assert collector._reconnect_delay == MAX_RECONNECT_DELAY
+
+
+@pytest.mark.asyncio
+async def test_collector_subscribes_to_both_creates_and_migrations(temp_db_path):
+    """Test that collector subscribes to BOTH subscribeNewToken and subscribeMigration.
+
+    This is a regression test for BUG A where collector only subscribed to migrations,
+    causing zero creation data to be collected.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    db = init_db(temp_db_path)
+
+    def on_migration(payload):
+        pass
+
+    collector = MigrationCollector(on_migration, db=db)
+
+    # Track sent subscription messages
+    sent_messages = []
+
+    async def track_send(msg):
+        sent_messages.append(json.loads(msg))
+
+    # Mock websocket connection
+    mock_ws = AsyncMock()
+    mock_ws.send = AsyncMock(side_effect=track_send)
+
+    # Create async iterator that yields no messages
+    async def async_iter():
+        return
+        yield  # Make this a generator
+
+    mock_ws.__aiter__ = lambda self: async_iter()
+
+    # Create context manager mock
+    class MockWebSocketContext:
+        async def __aenter__(self):
+            return mock_ws
+
+        async def __aexit__(self, *args):
+            return None
+
+    # Mock websockets.connect to return context manager
+    def mock_connect(*args, **kwargs):
+        return MockWebSocketContext()
+
+    with patch('websockets.connect', new=mock_connect):
+        try:
+            # Start collector and let it connect (will exit when no messages)
+            await asyncio.wait_for(collector._connect_and_listen(), timeout=2.0)
+        except (StopIteration, asyncio.TimeoutError, StopAsyncIteration):
+            pass  # Expected - no messages to process
+
+    # Verify BOTH subscription messages were sent
+    assert len(sent_messages) == 2, f"Expected 2 subscription messages, got {len(sent_messages)}"
+
+    # Check that both subscribeNewToken and subscribeMigration were sent
+    methods = [msg["method"] for msg in sent_messages]
+    assert "subscribeNewToken" in methods, "Missing subscribeNewToken subscription"
+    assert "subscribeMigration" in methods, "Missing subscribeMigration subscription"
+
+    # Verify they were sent in correct order (creates first, then migrations)
+    assert sent_messages[0]["method"] == "subscribeNewToken"
+    assert sent_messages[1]["method"] == "subscribeMigration"
+
+    # Verify both SUBSCRIBED events were logged to connection_events
+    db.row_factory = sqlite3.Row
+    events = db.execute(
+        "SELECT event, detail FROM connection_events WHERE event = 'SUBSCRIBED' ORDER BY id"
+    ).fetchall()
+
+    assert len(events) == 2
+    assert events[0]["detail"] == "subscribeNewToken"
+    assert events[1]["detail"] == "subscribeMigration"

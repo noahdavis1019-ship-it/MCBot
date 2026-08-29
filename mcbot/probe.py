@@ -31,7 +31,10 @@ SAMPLE_RATE = 1.0  # 100% of migrations (changed from 0.25)
 RNG_SEED = 42  # Fixed seed for reproducibility
 
 # Jupiter quote parameters
+JUPITER_BASE_URL = "https://api.jup.ag"
+JUPITER_QUOTE_PATH = "/swap/v1/quote"
 SOL_MINT = "So11111111111111111111111111111111111111112"
+USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 PROBE_AMOUNT_LAMPORTS = 100_000_000  # 0.1 SOL
 SLIPPAGE_BPS = 100  # 1% slippage tolerance
 
@@ -78,6 +81,84 @@ class QuoteProber:
         self._http_client = None
         self._rng = random.Random(RNG_SEED)
 
+    async def _startup_self_check(self) -> bool:
+        """Validate Jupiter API is accessible.
+
+        Issues a SOL->USDC quote to verify API availability before main loop.
+        Logs CRITICAL and writes parse_failures row if check fails.
+
+        Returns:
+            True if self-check passed, False otherwise
+        """
+        try:
+            url = f"{JUPITER_BASE_URL}{JUPITER_QUOTE_PATH}"
+            params = {
+                "inputMint": SOL_MINT,
+                "outputMint": USDC_MINT,
+                "amount": PROBE_AMOUNT_LAMPORTS,
+                "slippageBps": SLIPPAGE_BPS,
+            }
+
+            response = await self._http_client.get(url, params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                if "routePlan" in data:
+                    logger.info(
+                        "Jupiter API self-check passed",
+                        extra={
+                            "url": url,
+                            "status": 200,
+                            "has_route": True,
+                        }
+                    )
+                    return True
+                else:
+                    logger.critical(
+                        "Jupiter API returned 200 but no routePlan",
+                        extra={"url": url, "response": str(data)[:300]}
+                    )
+                    from mcbot.db import insert_parse_failure
+                    insert_parse_failure(
+                        self.db,
+                        "jupiter_self_check",
+                        json.dumps({"url": url, "status": 200, "data": data})
+                    )
+                    return False
+            else:
+                logger.critical(
+                    "Jupiter API self-check failed",
+                    extra={
+                        "url": url,
+                        "status": response.status_code,
+                        "response": response.text[:300],
+                    }
+                )
+                from mcbot.db import insert_parse_failure
+                insert_parse_failure(
+                    self.db,
+                    "jupiter_self_check",
+                    json.dumps({
+                        "url": url,
+                        "status": response.status_code,
+                        "text": response.text[:500]
+                    })
+                )
+                return False
+
+        except Exception as e:
+            logger.critical(
+                "Jupiter API self-check exception",
+                extra={"url": url, "error": str(e)}
+            )
+            from mcbot.db import insert_parse_failure
+            insert_parse_failure(
+                self.db,
+                "jupiter_self_check",
+                json.dumps({"url": url, "error": str(e)})
+            )
+            return False
+
     def maybe_schedule_probes(self, mint: str, migration_ts: str) -> None:
         """Schedule quote probes if migration is sampled.
 
@@ -118,9 +199,16 @@ class QuoteProber:
         self._running = True
         self._http_client = httpx.AsyncClient(timeout=30.0)
 
+        # Run startup self-check
+        if not await self._startup_self_check():
+            logger.critical("Jupiter API self-check failed - prober will not start")
+            await self._http_client.aclose()
+            return
+
         # Record sample_rate as versioned config
         insert_config(self.db, "probe.sample_rate", str(SAMPLE_RATE))
         insert_config(self.db, "probe.rng_seed", str(RNG_SEED))
+        insert_config(self.db, "probe.jupiter_base_url", JUPITER_BASE_URL)
 
         logger.info("Quote prober started", extra={"sample_rate": SAMPLE_RATE, "seed": RNG_SEED})
 
@@ -211,8 +299,8 @@ class QuoteProber:
         latency_start = time()
 
         try:
-            # Jupiter quote API v6
-            url = "https://quote-api.jup.ag/v6/quote"
+            # Jupiter quote API v1
+            url = f"{JUPITER_BASE_URL}{JUPITER_QUOTE_PATH}"
             params = {
                 "inputMint": input_mint,
                 "outputMint": output_mint,

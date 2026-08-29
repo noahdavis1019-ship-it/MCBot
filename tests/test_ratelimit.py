@@ -109,14 +109,14 @@ async def test_rate_limiter_dexscreener():
 
 @pytest.mark.asyncio
 async def test_rate_limiter_jupiter():
-    """Test Jupiter rate limiter."""
+    """Test Jupiter rate limiter (0.5 RPS with burst capacity of 3)."""
     limiter = RateLimiter()
 
     # Should succeed immediately
     assert limiter.try_acquire_jupiter() is True
 
-    # Consume burst capacity
-    for _ in range(4):
+    # Consume burst capacity (capacity=3, so 2 more after first)
+    for _ in range(2):
         assert limiter.try_acquire_jupiter() is True
 
     # Should fail after burst exhausted
