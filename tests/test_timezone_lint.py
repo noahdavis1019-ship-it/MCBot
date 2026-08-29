@@ -86,6 +86,7 @@ def test_all_db_timestamps_are_timezone_aware():
             horizon_label="1m",
             scheduled_ts_utc="2026-01-01T00:01:00+00:00",
             actual_ts_utc="2026-01-01T00:01:02+00:00",
+        obs_status="OK",
             http_status=200,
         )
 

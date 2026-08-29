@@ -50,7 +50,7 @@ def test_schema_version_recorded(temp_db):
     """Test that schema version is recorded."""
     cursor = temp_db.execute("SELECT version FROM schema_version")
     version = cursor.fetchone()[0]
-    assert version == 5
+    assert version == 6
 
 
 def test_insert_migration(temp_db):
@@ -109,6 +109,7 @@ def test_insert_observation_success(temp_db):
         horizon_label="5m",
         scheduled_ts_utc="2026-08-29T12:05:00",
         actual_ts_utc="2026-08-29T12:05:02",
+        obs_status="OK",
         price_usd=0.0001234,
         price_native=0.000000567,
         liquidity_usd=50000.0,

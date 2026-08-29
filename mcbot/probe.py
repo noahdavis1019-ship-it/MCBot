@@ -12,6 +12,7 @@ from typing import Protocol
 
 import httpx
 
+from mcbot.db import insert_config, insert_quote_probe
 from mcbot.ratelimit import RateLimiter
 from mcbot.timeutil import utcnow_iso
 
@@ -26,7 +27,7 @@ PROBE_HORIZONS = [
 ]
 
 # Sampling parameters
-SAMPLE_RATE = 0.25  # 25% of migrations
+SAMPLE_RATE = 1.0  # 100% of migrations (changed from 0.25)
 RNG_SEED = 42  # Fixed seed for reproducibility
 
 # Jupiter quote parameters
@@ -116,6 +117,10 @@ class QuoteProber:
         """Start prober loop."""
         self._running = True
         self._http_client = httpx.AsyncClient(timeout=30.0)
+
+        # Record sample_rate as versioned config
+        insert_config(self.db, "probe.sample_rate", str(SAMPLE_RATE))
+        insert_config(self.db, "probe.rng_seed", str(RNG_SEED))
 
         logger.info("Quote prober started", extra={"sample_rate": SAMPLE_RATE, "seed": RNG_SEED})
 
@@ -224,7 +229,8 @@ class QuoteProber:
                 price_impact_pct = float(data.get("priceImpactPct", 0.0))
                 route_plan = json.dumps(data.get("routePlan", []))
 
-                self.db.insert_quote_probe(
+                insert_quote_probe(
+                    conn=self.db,
                     mint=mint,
                     probe_ts_utc=probe_ts_utc,
                     direction=direction,
@@ -248,7 +254,8 @@ class QuoteProber:
                 )
             else:
                 # HTTP error
-                self.db.insert_quote_probe(
+                insert_quote_probe(
+                    conn=self.db,
                     mint=mint,
                     probe_ts_utc=probe_ts_utc,
                     direction=direction,
@@ -273,7 +280,8 @@ class QuoteProber:
         except Exception as e:
             # Network or parsing error
             latency_ms = int((time() - latency_start) * 1000)
-            self.db.insert_quote_probe(
+            insert_quote_probe(
+                conn=self.db,
                 mint=mint,
                 probe_ts_utc=probe_ts_utc,
                 direction=direction,

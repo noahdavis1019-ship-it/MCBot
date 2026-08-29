@@ -73,7 +73,7 @@ def test_scheduler_queue_ordering(temp_db_path):
 
 
 def test_quote_prober_sampling(temp_db_path):
-    """Test that quote prober samples 25% of migrations."""
+    """Test that quote prober samples 100% of migrations."""
     db = init_db(temp_db_path)
     rate_limiter = RateLimiter()
     prober = QuoteProber(db, rate_limiter)
@@ -88,8 +88,8 @@ def test_quote_prober_sampling(temp_db_path):
         if new_queue_size > initial_queue_size:
             sampled_count += 1
 
-    # Should sample approximately 25% (allow variance)
-    assert 15 <= sampled_count <= 35
+    # Should sample 100% (all migrations)
+    assert sampled_count == 100
 
 
 def test_quote_prober_deterministic_sampling():

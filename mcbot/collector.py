@@ -77,6 +77,9 @@ class MigrationCollector:
 
     async def _connect_and_listen(self) -> None:
         """Connect to websocket and listen for messages."""
+        from mcbot.db import insert_connection_event
+        from mcbot.timeutil import utcnow_iso
+
         # Build URL with optional API key
         if self._api_key:
             ws_url = f"wss://pumpportal.fun/api/data?api-key={self._api_key}"
@@ -88,29 +91,58 @@ class MigrationCollector:
             extra={"has_api_key": bool(self._api_key)}
         )
 
-        async with websockets.connect(ws_url) as ws:
-            self._ws = ws
-            logger.info("Connected to PumpPortal")
+        try:
+            async with websockets.connect(ws_url) as ws:
+                self._ws = ws
+                logger.info("Connected to PumpPortal")
 
-            # Subscribe to migration events only
-            subscribe_msg = {
-                "method": "subscribeMigration"
-            }
-            await ws.send(json.dumps(subscribe_msg))
-            logger.info("Subscribed to migration events")
-
-            # Reset backoff on successful connection
-            self._reconnect_delay = 1.0
-
-            # Listen for messages
-            async for message in ws:
-                try:
-                    await self._handle_message(message)
-                except Exception as e:
-                    logger.error(
-                        "Error handling message",
-                        extra={"error": str(e), "raw_frame": message[:200]}
+                # Log connection event
+                if self.db:
+                    insert_connection_event(
+                        conn=self.db,
+                        ts_utc=utcnow_iso(),
+                        event="CONNECTED",
+                        detail=f"has_api_key={bool(self._api_key)}",
                     )
+
+                # Subscribe to migration events only
+                subscribe_msg = {
+                    "method": "subscribeMigration"
+                }
+                await ws.send(json.dumps(subscribe_msg))
+                logger.info("Subscribed to migration events")
+
+                # Log subscription event
+                if self.db:
+                    insert_connection_event(
+                        conn=self.db,
+                        ts_utc=utcnow_iso(),
+                        event="SUBSCRIBED",
+                        detail="subscribeMigration",
+                    )
+
+                # Reset backoff on successful connection
+                self._reconnect_delay = 1.0
+
+                # Listen for messages
+                async for message in ws:
+                    try:
+                        await self._handle_message(message)
+                    except Exception as e:
+                        logger.error(
+                            "Error handling message",
+                            extra={"error": str(e), "raw_frame": message[:200]}
+                        )
+        except Exception as e:
+            # Log disconnection event
+            if self.db:
+                insert_connection_event(
+                    conn=self.db,
+                    ts_utc=utcnow_iso(),
+                    event="DISCONNECTED",
+                    detail=f"{type(e).__name__}: {str(e)}",
+                )
+            raise  # Re-raise to trigger reconnection
 
     async def _handle_message(self, message: str) -> None:
         """Parse and handle incoming websocket message with three-way routing.
@@ -253,9 +285,23 @@ class MigrationCollector:
 
     async def _backoff(self) -> None:
         """Wait with exponential backoff before reconnecting."""
+        from mcbot.db import insert_connection_event
+        from mcbot.timeutil import utcnow_iso
+
         logger.warning(
             "Reconnecting after delay",
             extra={"delay_seconds": self._reconnect_delay}
         )
+
+        # Log reconnect attempt
+        if self.db:
+            insert_connection_event(
+                conn=self.db,
+                ts_utc=utcnow_iso(),
+                event="RECONNECT_ATTEMPT",
+                detail=f"Waiting {self._reconnect_delay}s before retry",
+                backoff_delay_s=self._reconnect_delay,
+            )
+
         await self._sleep_func(self._reconnect_delay)
         self._reconnect_delay = min(self._reconnect_delay * 2, MAX_RECONNECT_DELAY)

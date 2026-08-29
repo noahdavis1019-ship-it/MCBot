@@ -7,19 +7,21 @@
 
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/YOUR_USERNAME/MCBot/.venv/bin/python3</string>
+        <string>/usr/bin/caffeinate</string>
+        <string>-i</string>
+        <string>/Users/noahdavis/MCBot/.venv/bin/python3</string>
         <string>-m</string>
         <string>mcbot.collect</string>
     </array>
 
     <key>WorkingDirectory</key>
-    <string>/Users/YOUR_USERNAME/MCBot</string>
+    <string>/Users/noahdavis/MCBot</string>
 
     <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.mcbot/logs/stdout.log</string>
+    <string>/Users/noahdavis/.mcbot/logs/stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.mcbot/logs/stderr.log</string>
+    <string>/Users/noahdavis/.mcbot/logs/stderr.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>

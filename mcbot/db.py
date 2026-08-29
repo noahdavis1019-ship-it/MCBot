@@ -5,7 +5,7 @@ from pathlib import Path
 
 from mcbot.timeutil import utcnow_iso
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -13,6 +13,16 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER PRIMARY KEY,
     applied_at_utc TEXT NOT NULL
 );
+
+-- Experiment configuration (versioned)
+CREATE TABLE IF NOT EXISTS config (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    key TEXT NOT NULL,
+    value TEXT NOT NULL,
+    applied_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_config_key ON config(key, applied_at_utc DESC);
 
 -- Token creation events from PumpPortal (the unfiltered universe)
 CREATE TABLE IF NOT EXISTS creations (
@@ -121,6 +131,19 @@ CREATE TABLE IF NOT EXISTS parse_failures (
 
 CREATE INDEX IF NOT EXISTS idx_parse_failures_ts ON parse_failures(received_ts);
 
+-- Connection events for tracking disconnections and missed migrations
+CREATE TABLE IF NOT EXISTS connection_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event TEXT NOT NULL,  -- CONNECTED | DISCONNECTED | RECONNECT_ATTEMPT | SUBSCRIBED
+    detail TEXT,
+    backoff_delay_s REAL,
+    collected_at_utc TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_connection_events_ts ON connection_events(ts_utc);
+CREATE INDEX IF NOT EXISTS idx_connection_events_event ON connection_events(event);
+
 -- Token lifecycle view: joins creations to migrations
 CREATE VIEW IF NOT EXISTS token_lifecycle AS
 SELECT
@@ -128,12 +151,20 @@ SELECT
     c.name,
     c.symbol,
     c.trader_public_key,
-    c.recv_ts_utc AS created_ts_utc,
+    COALESCE(c.block_ts_utc, c.recv_ts_utc) AS created_ts_utc,
     c.block_ts_utc AS created_block_ts_utc,
-    m.migration_ts_utc AS migrated_ts_utc,
+    c.recv_ts_utc AS created_recv_ts_utc,
+    COALESCE(m.block_ts_utc, m.migration_ts_utc) AS migrated_ts_utc,
+    m.block_ts_utc AS migrated_block_ts_utc,
+    m.migration_ts_utc AS migrated_recv_ts_utc,
+    CASE
+        WHEN c.block_ts_utc IS NOT NULL AND m.block_ts_utc IS NOT NULL THEN 'block'
+        WHEN c.block_ts_utc IS NULL AND m.block_ts_utc IS NULL THEN 'recv'
+        ELSE 'mixed'
+    END AS t0_basis,
     CASE
         WHEN m.migration_ts_utc IS NOT NULL THEN
-            CAST((julianday(m.migration_ts_utc) - julianday(c.recv_ts_utc)) * 86400 AS INTEGER)
+            CAST((julianday(COALESCE(m.block_ts_utc, m.migration_ts_utc)) - julianday(COALESCE(c.block_ts_utc, c.recv_ts_utc))) * 86400 AS INTEGER)
         ELSE NULL
     END AS seconds_to_migration,
     c.market_cap_sol,
@@ -291,7 +322,7 @@ def insert_observation(
     horizon_label: str,
     scheduled_ts_utc: str,
     actual_ts_utc: str,
-    obs_status: str = "OK",
+    obs_status: str,
     price_usd: float | None = None,
     price_native: float | None = None,
     liquidity_usd: float | None = None,
@@ -423,6 +454,7 @@ def insert_heartbeat(conn: sqlite3.Connection) -> int:
         horizon_label="heartbeat",
         scheduled_ts_utc=now,
         actual_ts_utc=now,
+        obs_status="OK",
         http_status=None,
     )
 
@@ -452,6 +484,62 @@ def insert_parse_failure(
         VALUES (?, ?, ?, ?, ?)
         """,
         (received_ts, raw_frame, reason, parser_version, utcnow_iso())
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def insert_connection_event(
+    conn: sqlite3.Connection,
+    ts_utc: str,
+    event: str,
+    detail: str | None = None,
+    backoff_delay_s: float | None = None,
+) -> int:
+    """Insert a connection event for tracking disconnections and missed migrations.
+
+    Args:
+        conn: SQLite connection
+        ts_utc: Event timestamp (ISO 8601 UTC)
+        event: Event type (CONNECTED, DISCONNECTED, RECONNECT_ATTEMPT, SUBSCRIBED)
+        detail: Optional event details
+        backoff_delay_s: Backoff delay in seconds (for RECONNECT_ATTEMPT events)
+
+    Returns:
+        Row ID of inserted event
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO connection_events (ts_utc, event, detail, backoff_delay_s, collected_at_utc)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (ts_utc, event, detail, backoff_delay_s, utcnow_iso())
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def insert_config(
+    conn: sqlite3.Connection,
+    key: str,
+    value: str,
+) -> int:
+    """Insert a configuration value (versioned).
+
+    Args:
+        conn: SQLite connection
+        key: Configuration key (e.g., 'probe.sample_rate')
+        value: Configuration value as string
+
+    Returns:
+        Row ID of inserted config
+    """
+    cursor = conn.execute(
+        """
+        INSERT INTO config (key, value, applied_at_utc)
+        VALUES (?, ?, ?)
+        """,
+        (key, value, utcnow_iso())
     )
     conn.commit()
     return cursor.lastrowid

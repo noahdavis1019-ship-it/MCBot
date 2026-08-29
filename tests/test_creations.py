@@ -163,6 +163,101 @@ def test_token_lifecycle_view_no_migration():
         assert row[3] is None  # No time to migration
 
 
+def test_token_lifecycle_t0_basis():
+    """Test token_lifecycle t0_basis column for all three cases: block, recv, mixed."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = Path(tmpdir) / "test.db"
+        db = init_db(db_path)
+
+        from mcbot.db import insert_migration
+
+        # Case 1: Both have block_ts_utc → t0_basis='block'
+        insert_creation(
+            conn=db,
+            mint="mint_block",
+            signature="sig1",
+            recv_ts_utc="2026-08-29T12:00:00+00:00",
+            raw_payload='{}',
+            block_ts_utc="2026-08-29T11:59:58+00:00",  # 2 seconds earlier
+        )
+        insert_migration(
+            conn=db,
+            mint="mint_block",
+            symbol="BLOCK",
+            pool="raydium",
+            migration_ts_utc="2026-08-29T12:05:00+00:00",
+            raw_payload='{}',
+            block_ts_utc="2026-08-29T12:04:58+00:00",  # 2 seconds earlier
+        )
+
+        # Case 2: Neither has block_ts_utc → t0_basis='recv'
+        insert_creation(
+            conn=db,
+            mint="mint_recv",
+            signature="sig2",
+            recv_ts_utc="2026-08-29T12:00:00+00:00",
+            raw_payload='{}',
+            block_ts_utc=None,
+        )
+        insert_migration(
+            conn=db,
+            mint="mint_recv",
+            symbol="RECV",
+            pool="raydium",
+            migration_ts_utc="2026-08-29T12:05:00+00:00",
+            raw_payload='{}',
+            block_ts_utc=None,
+        )
+
+        # Case 3: Only creation has block_ts_utc → t0_basis='mixed'
+        insert_creation(
+            conn=db,
+            mint="mint_mixed",
+            signature="sig3",
+            recv_ts_utc="2026-08-29T12:00:00+00:00",
+            raw_payload='{}',
+            block_ts_utc="2026-08-29T11:59:58+00:00",
+        )
+        insert_migration(
+            conn=db,
+            mint="mint_mixed",
+            symbol="MIXED",
+            pool="raydium",
+            migration_ts_utc="2026-08-29T12:05:00+00:00",
+            raw_payload='{}',
+            block_ts_utc=None,
+        )
+
+        # Verify t0_basis for all cases
+        cursor = db.execute("""
+            SELECT mint, t0_basis, created_ts_utc, migrated_ts_utc, seconds_to_migration
+            FROM token_lifecycle
+            WHERE mint IN ('mint_block', 'mint_recv', 'mint_mixed')
+            ORDER BY mint
+        """)
+        rows = cursor.fetchall()
+
+        # mint_block: uses block times
+        assert rows[0][0] == "mint_block"
+        assert rows[0][1] == "block"
+        assert rows[0][2] == "2026-08-29T11:59:58+00:00"  # Uses block_ts_utc
+        assert rows[0][3] == "2026-08-29T12:04:58+00:00"  # Uses block_ts_utc
+        assert abs(rows[0][4] - 300) <= 1  # 5 minutes
+
+        # mint_mixed: uses block for creation, recv for migration
+        assert rows[1][0] == "mint_mixed"
+        assert rows[1][1] == "mixed"
+        assert rows[1][2] == "2026-08-29T11:59:58+00:00"  # Uses block_ts_utc
+        assert rows[1][3] == "2026-08-29T12:05:00+00:00"  # Uses recv migration_ts_utc
+
+        # mint_recv: uses recv times
+        assert rows[2][0] == "mint_recv"
+        assert rows[2][1] == "recv"
+        assert rows[2][2] == "2026-08-29T12:00:00+00:00"  # Uses recv_ts_utc
+        assert rows[2][3] == "2026-08-29T12:05:00+00:00"  # Uses migration_ts_utc
+        assert abs(rows[2][4] - 300) <= 1  # 5 minutes
+
+
 def test_creation_volume_throughput():
     """Test insert throughput at ~25,000 rows/day volume (17-18 per minute).
 

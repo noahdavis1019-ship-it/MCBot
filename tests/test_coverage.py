@@ -37,6 +37,7 @@ def test_coverage_report_with_heartbeats():
                 horizon_label="heartbeat",
                 scheduled_ts_utc=ts,
                 actual_ts_utc=ts,
+        obs_status="OK",
                 http_status=None,
             )
 
