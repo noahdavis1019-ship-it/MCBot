@@ -13,6 +13,7 @@ dependencies = [
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-timeout>=2.3.0",
     "ruff>=0.3.0",
 ]
 
@@ -32,4 +33,4 @@ ignore = []
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
-addopts = "-v --tb=short"
+addopts = "-v --tb=short --timeout=30"  # Global 30s timeout per test (fail loudly on hangs)

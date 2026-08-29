@@ -171,27 +171,31 @@ def test_single_connection_enforcement():
 
 @pytest.mark.asyncio
 async def test_collector_reconnect_backoff():
-    """Test that collector implements exponential backoff on reconnect."""
+    """Test that collector implements exponential backoff (1,2,4,8,...,300 cap) without real waiting."""
+    from mcbot.collector import MAX_RECONNECT_DELAY
+
     def on_migration(payload):
         pass
 
-    collector = MigrationCollector(on_migration)
+    # Fake sleep that records delays instead of waiting
+    sleep_delays = []
+
+    async def fake_sleep(delay: float):
+        sleep_delays.append(delay)
+
+    collector = MigrationCollector(on_migration, sleep_func=fake_sleep)
 
     # Initial delay should be 1.0
     assert collector._reconnect_delay == 1.0
 
-    # Simulate first backoff
-    await collector._backoff()
-    assert collector._reconnect_delay == 2.0
-
-    # Simulate second backoff
-    await collector._backoff()
-    assert collector._reconnect_delay == 4.0
-
-    # Continue until max
-    for _ in range(10):
+    # Call backoff repeatedly and track the exponential sequence
+    for _ in range(12):
         await collector._backoff()
 
-    # Should not exceed max delay
-    from mcbot.collector import MAX_RECONNECT_DELAY
-    assert collector._reconnect_delay <= MAX_RECONNECT_DELAY
+    # Verify exponential backoff sequence: 1, 2, 4, 8, 16, 32, 64, 128, 256, 300(cap), 300, 300
+    expected_delays = [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0, 256.0]
+    # After 256, next would be 512 but capped at MAX_RECONNECT_DELAY=300
+    expected_delays += [MAX_RECONNECT_DELAY] * 3
+
+    assert sleep_delays == expected_delays
+    assert collector._reconnect_delay == MAX_RECONNECT_DELAY

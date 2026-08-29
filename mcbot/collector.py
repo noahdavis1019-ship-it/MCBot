@@ -22,15 +22,22 @@ class MigrationCollector:
     NEVER opens concurrent connections (PumpPortal bans for this).
     """
 
-    def __init__(self, on_migration: Callable[[dict], None], db: sqlite3.Connection | None = None):
+    def __init__(
+        self,
+        on_migration: Callable[[dict], None],
+        db: sqlite3.Connection | None = None,
+        sleep_func: Callable[[float], None] = asyncio.sleep,
+    ):
         """Initialize collector.
 
         Args:
             on_migration: Callback function called for each migration event
             db: SQLite connection for parse failure logging (optional)
+            sleep_func: Async sleep function (for testing with fake clock)
         """
         self.on_migration = on_migration
         self.db = db
+        self._sleep_func = sleep_func
         self._ws = None
         self._running = False
         self._reconnect_delay = 1.0
@@ -250,5 +257,5 @@ class MigrationCollector:
             "Reconnecting after delay",
             extra={"delay_seconds": self._reconnect_delay}
         )
-        await asyncio.sleep(self._reconnect_delay)
+        await self._sleep_func(self._reconnect_delay)
         self._reconnect_delay = min(self._reconnect_delay * 2, MAX_RECONNECT_DELAY)
