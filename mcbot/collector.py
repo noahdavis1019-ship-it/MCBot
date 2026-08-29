@@ -32,14 +32,9 @@ class MigrationCollector:
         self._running = False
         self._reconnect_delay = 1.0
 
-        # Load API key from environment
+        # Load API key from environment (optional - will test keyless connection)
         load_dotenv()
         self._api_key = os.getenv("PUMPPORTAL_API_KEY")
-        if not self._api_key:
-            raise ValueError(
-                "PUMPPORTAL_API_KEY not found in environment. "
-                "See .env.example for setup instructions."
-            )
 
     async def start(self) -> None:
         """Start collector with automatic reconnection."""
@@ -61,8 +56,16 @@ class MigrationCollector:
 
     async def _connect_and_listen(self) -> None:
         """Connect to websocket and listen for messages."""
-        ws_url = f"wss://pumpportal.fun/api/data?api-key={self._api_key}"
-        logger.info("Connecting to PumpPortal")
+        # Build URL with optional API key
+        if self._api_key:
+            ws_url = f"wss://pumpportal.fun/api/data?api-key={self._api_key}"
+        else:
+            ws_url = "wss://pumpportal.fun/api/data"
+
+        logger.info(
+            "Connecting to PumpPortal",
+            extra={"has_api_key": bool(self._api_key)}
+        )
 
         async with websockets.connect(ws_url) as ws:
             self._ws = ws
@@ -85,7 +88,7 @@ class MigrationCollector:
                 except Exception as e:
                     logger.error(
                         "Error handling message",
-                        extra={"error": str(e), "message": message[:200]}
+                        extra={"error": str(e), "raw_frame": message[:200]}
                     )
 
     async def _handle_message(self, message: str) -> None:
@@ -94,23 +97,54 @@ class MigrationCollector:
         Args:
             message: Raw websocket message string
         """
+        from mcbot.db import insert_parse_failure
+        from mcbot.timeutil import utcnow_iso
+
+        received_ts = utcnow_iso()
+
         try:
             data = json.loads(message)
         except json.JSONDecodeError as e:
-            logger.error("Invalid JSON", extra={"error": str(e), "message": message[:200]})
+            logger.error("Invalid JSON", extra={"error": str(e), "raw_frame": message[:200]})
+            # This shouldn't have a db connection here yet, but will after recording
+            # For now just log and return
             return
 
-        # Detect message type - migration events typically have specific structure
-        # Exact format depends on PumpPortal API - adjust as needed
+        # Validate message structure
         if not isinstance(data, dict):
-            logger.warning("Non-dict message", extra={"message": message[:200]})
+            logger.warning("Non-dict message", extra={"raw_frame": message[:200]})
             return
 
-        # Call migration handler
-        # This assumes the entire message is a migration event
-        # Adjust filtering logic based on actual PumpPortal format
-        logger.info("Migration event received", extra={"mint": data.get("mint", "unknown")})
-        self.on_migration(data)
+        # Filter for migration events based on observed schema
+        # Observed migration frame: {"signature": str, "mint": str, "txType": "migrate", "pool": str}
+        if data.get("txType") == "migrate":
+            # Validate required fields
+            required_fields = ["signature", "mint", "pool"]
+            missing_fields = [f for f in required_fields if f not in data]
+
+            if missing_fields:
+                logger.warning(
+                    "Migration frame missing fields",
+                    extra={"missing": missing_fields, "raw_frame": message[:200]}
+                )
+                return
+
+            # Valid migration - extract timestamp and route to callback
+            migration_data = {
+                "signature": data["signature"],
+                "mint": data["mint"],
+                "pool": data["pool"],
+                "migration_ts_utc": received_ts,  # Use receive time as migration timestamp
+            }
+            self.on_migration(migration_data)
+            logger.info(
+                "Migration detected",
+                extra={"mint": data["mint"], "pool": data["pool"]}
+            )
+        else:
+            # Non-migration frame (token create, subscription confirm, etc.) - filter silently
+            tx_type = data.get("txType", data.get("message", "unknown"))
+            logger.debug("Non-migration frame filtered", extra={"type": tx_type})
 
     async def _backoff(self) -> None:
         """Wait with exponential backoff before reconnecting."""

@@ -50,7 +50,7 @@ def test_schema_version_recorded(temp_db):
     """Test that schema version is recorded."""
     cursor = temp_db.execute("SELECT version FROM schema_version")
     version = cursor.fetchone()[0]
-    assert version == 1
+    assert version == 2
 
 
 def test_insert_migration(temp_db):
@@ -126,9 +126,10 @@ def test_insert_observation_success(temp_db):
 
     assert row[1] == "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"  # mint
     assert row[2] == "5m"  # horizon_label
-    assert row[5] == 0.0001234  # price_usd
-    assert row[11] == 10  # txns_buys_5m
-    assert row[14] == 200  # http_status
+    assert row[5] == "OK"  # obs_status
+    assert row[6] == 0.0001234  # price_usd
+    assert row[12] == 10  # txns_buys_5m
+    assert row[15] == 200  # http_status
 
 
 def test_insert_observation_failed(temp_db):
@@ -139,19 +140,21 @@ def test_insert_observation_failed(temp_db):
         horizon_label="1h",
         scheduled_ts_utc="2026-08-29T13:00:00",
         actual_ts_utc="2026-08-29T13:00:05",
+        obs_status="HTTP_ERROR",
         http_status=404,
         request_latency_ms=200,
         raw_payload="Not found",
     )
 
     cursor = temp_db.execute(
-        "SELECT price_usd, http_status FROM observations WHERE id = ?",
+        "SELECT obs_status, price_usd, http_status FROM observations WHERE id = ?",
         (row_id,)
     )
     row = cursor.fetchone()
 
-    assert row[0] is None  # price_usd should be NULL
-    assert row[1] == 404  # http_status
+    assert row[0] == "HTTP_ERROR"  # obs_status
+    assert row[1] is None  # price_usd should be NULL
+    assert row[2] == 404  # http_status
 
 
 def test_insert_heartbeat(temp_db):

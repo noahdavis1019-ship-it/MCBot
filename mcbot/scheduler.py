@@ -12,6 +12,7 @@ from typing import Protocol
 import httpx
 
 from mcbot.ratelimit import RateLimiter
+from mcbot.timeutil import ts_to_utc_iso, utcnow_iso
 
 logger = logging.getLogger(__name__)
 
@@ -127,15 +128,16 @@ class ObservationScheduler:
             # This indicates chronic rate limit saturation - log as missed
             lateness = now - obs.scheduled_ts
             if lateness > 300:  # 5 minutes
-                scheduled_ts_utc = datetime.fromtimestamp(obs.scheduled_ts).isoformat()
-                actual_ts_utc = datetime.utcnow().isoformat()
+                scheduled_ts_utc = ts_to_utc_iso(obs.scheduled_ts)
+                actual_ts_utc = utcnow_iso()
 
                 self.db.insert_observation(
                     mint=obs.mint,
                     horizon_label=obs.horizon_label,
                     scheduled_ts_utc=scheduled_ts_utc,
                     actual_ts_utc=actual_ts_utc,
-                    http_status=429,  # Too Many Requests - rate limited
+                    obs_status="MISSED_LATE",
+                    http_status=None,
                     request_latency_ms=0,
                     raw_payload=f"Observation skipped: {lateness:.0f}s late due to rate limits",
                 )
@@ -168,8 +170,8 @@ class ObservationScheduler:
         Args:
             obs: Scheduled observation to execute
         """
-        scheduled_ts_utc = datetime.fromtimestamp(obs.scheduled_ts).isoformat()
-        actual_ts_utc = datetime.utcnow().isoformat()
+        scheduled_ts_utc = ts_to_utc_iso(obs.scheduled_ts)
+        actual_ts_utc = utcnow_iso()
 
         latency_start = time()
 
@@ -192,6 +194,7 @@ class ObservationScheduler:
                     horizon_label=obs.horizon_label,
                     scheduled_ts_utc=scheduled_ts_utc,
                     actual_ts_utc=actual_ts_utc,
+                    obs_status="HTTP_ERROR",
                     http_status=response.status_code,
                     request_latency_ms=latency_ms,
                     raw_payload=response.text,
@@ -213,7 +216,8 @@ class ObservationScheduler:
                 horizon_label=obs.horizon_label,
                 scheduled_ts_utc=scheduled_ts_utc,
                 actual_ts_utc=actual_ts_utc,
-                http_status=0,  # 0 indicates network error
+                obs_status="HTTP_ERROR",
+                http_status=None,
                 request_latency_ms=latency_ms,
                 raw_payload=str(e),
             )

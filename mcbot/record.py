@@ -12,20 +12,26 @@ import websockets
 from dotenv import load_dotenv
 
 
-async def record_frames(api_key: str, duration_minutes: int, output_path: Path) -> None:
+async def record_frames(api_key: str | None, duration_minutes: int, output_path: Path) -> None:
     """Record websocket frames for specified duration.
 
     Args:
-        api_key: PumpPortal API key
+        api_key: PumpPortal API key (optional)
         duration_minutes: How long to record in minutes
         output_path: Where to write JSONL output
     """
-    ws_url = f"wss://pumpportal.fun/api/data?api-key={api_key}"
+    # Build URL with optional API key
+    if api_key:
+        ws_url = f"wss://pumpportal.fun/api/data?api-key={api_key}"
+    else:
+        ws_url = "wss://pumpportal.fun/api/data"
+
     frame_count = 0
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    print(f"Connecting to {ws_url[:50]}...")
+    print(f"Connecting to wss://pumpportal.fun/api/data")
+    print(f"API key: {'present' if api_key else 'NOT SET (testing keyless)'}")
     print(f"Recording for {duration_minutes} minutes")
     print(f"Output: {output_path}")
     print("-" * 60)
@@ -103,19 +109,14 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load API key from environment
+    # Load API key from environment (optional)
     load_dotenv()
     api_key = os.getenv("PUMPPORTAL_API_KEY")
 
     if not api_key:
-        print("ERROR: PUMPPORTAL_API_KEY not found in environment")
+        print("WARNING: PUMPPORTAL_API_KEY not found in environment")
+        print("Attempting keyless connection (testing if API key is required)...")
         print("")
-        print("To fix this:")
-        print("1. Get a free API key from https://pumpportal.fun/")
-        print("2. Copy .env.example to .env")
-        print("3. Add your API key to .env")
-        print("")
-        sys.exit(1)
 
     # Run recording
     asyncio.run(record_frames(api_key, args.minutes, args.out))

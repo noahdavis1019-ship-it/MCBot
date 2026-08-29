@@ -1,10 +1,11 @@
 """SQLite database schema and operations for EXP-001."""
 
 import sqlite3
-from datetime import datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+from mcbot.timeutil import utcnow_iso
+
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 -- Schema version tracking
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS observations (
     horizon_label TEXT NOT NULL,
     scheduled_ts_utc TEXT NOT NULL,
     actual_ts_utc TEXT NOT NULL,
+    obs_status TEXT NOT NULL DEFAULT 'OK',
     price_usd REAL,
     price_native REAL,
     liquidity_usd REAL,
@@ -53,6 +55,7 @@ CREATE TABLE IF NOT EXISTS observations (
 CREATE INDEX IF NOT EXISTS idx_observations_mint ON observations(mint);
 CREATE INDEX IF NOT EXISTS idx_observations_horizon ON observations(horizon_label);
 CREATE INDEX IF NOT EXISTS idx_observations_scheduled ON observations(scheduled_ts_utc);
+CREATE INDEX IF NOT EXISTS idx_observations_status ON observations(obs_status);
 
 -- Jupiter quote probes for execution cost estimation
 CREATE TABLE IF NOT EXISTS quote_probes (
@@ -112,7 +115,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     if cursor.fetchone() is None:
         conn.execute(
             "INSERT INTO schema_version (version, applied_at_utc) VALUES (?, ?)",
-            (SCHEMA_VERSION, datetime.utcnow().isoformat())
+            (SCHEMA_VERSION, utcnow_iso())
         )
         conn.commit()
 
@@ -145,7 +148,7 @@ def insert_migration(
         INSERT INTO migrations (mint, symbol, pool, migration_ts_utc, raw_payload, collected_at_utc)
         VALUES (?, ?, ?, ?, ?, ?)
         """,
-        (mint, symbol, pool, migration_ts_utc, raw_payload, datetime.utcnow().isoformat())
+        (mint, symbol, pool, migration_ts_utc, raw_payload, utcnow_iso())
     )
     conn.commit()
     return cursor.lastrowid
@@ -157,6 +160,7 @@ def insert_observation(
     horizon_label: str,
     scheduled_ts_utc: str,
     actual_ts_utc: str,
+    obs_status: str = "OK",
     price_usd: float | None = None,
     price_native: float | None = None,
     liquidity_usd: float | None = None,
@@ -178,6 +182,7 @@ def insert_observation(
         horizon_label: Horizon name (1m, 5m, 15m, 30m, 1h, 4h, 24h)
         scheduled_ts_utc: When observation was scheduled
         actual_ts_utc: When observation was attempted
+        obs_status: Observation status (OK | MISSED_LATE | HTTP_ERROR | PARSE_ERROR)
         price_usd: Token price in USD
         price_native: Token price in native (SOL)
         liquidity_usd: Pool liquidity in USD
@@ -187,7 +192,7 @@ def insert_observation(
         txns_buys_5m: Buy transaction count (5m)
         txns_sells_5m: Sell transaction count (5m)
         dex_id: DEX identifier
-        http_status: HTTP status code (None for heartbeat)
+        http_status: HTTP status code (real HTTP codes only, not sentinels)
         request_latency_ms: Request latency in ms
         raw_payload: Full JSON response as string
 
@@ -197,19 +202,19 @@ def insert_observation(
     cursor = conn.execute(
         """
         INSERT INTO observations (
-            mint, horizon_label, scheduled_ts_utc, actual_ts_utc,
+            mint, horizon_label, scheduled_ts_utc, actual_ts_utc, obs_status,
             price_usd, price_native, liquidity_usd, fdv,
             vol_5m, vol_1h, txns_buys_5m, txns_sells_5m,
             dex_id, http_status, request_latency_ms, raw_payload,
             collected_at_utc
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            mint, horizon_label, scheduled_ts_utc, actual_ts_utc,
+            mint, horizon_label, scheduled_ts_utc, actual_ts_utc, obs_status,
             price_usd, price_native, liquidity_usd, fdv,
             vol_5m, vol_1h, txns_buys_5m, txns_sells_5m,
             dex_id, http_status, request_latency_ms, raw_payload,
-            datetime.utcnow().isoformat()
+            utcnow_iso()
         )
     )
     conn.commit()
@@ -262,7 +267,7 @@ def insert_quote_probe(
             mint, probe_ts_utc, direction, in_amount_lamports,
             out_amount, price_impact_pct, route_plan_json,
             slippage_bps_requested, http_status, request_latency_ms,
-            raw_payload, datetime.utcnow().isoformat()
+            raw_payload, utcnow_iso()
         )
     )
     conn.commit()
@@ -280,7 +285,7 @@ def insert_heartbeat(conn: sqlite3.Connection) -> int:
     Returns:
         Row ID of inserted heartbeat
     """
-    now = datetime.utcnow().isoformat()
+    now = utcnow_iso()
     return insert_observation(
         conn=conn,
         mint="HEARTBEAT",
@@ -315,7 +320,116 @@ def insert_parse_failure(
         INSERT INTO parse_failures (received_ts, raw_frame, reason, parser_version, collected_at_utc)
         VALUES (?, ?, ?, ?, ?)
         """,
-        (received_ts, raw_frame, reason, parser_version, datetime.utcnow().isoformat())
+        (received_ts, raw_frame, reason, parser_version, utcnow_iso())
     )
     conn.commit()
     return cursor.lastrowid
+
+
+def get_coverage_report(conn: sqlite3.Connection, start_ts_utc: str | None = None, end_ts_utc: str | None = None) -> list[dict]:
+    """Get hourly coverage report showing uptime and observation counts.
+
+    Args:
+        conn: SQLite connection
+        start_ts_utc: Start of reporting period (ISO 8601 UTC), defaults to 24h ago
+        end_ts_utc: End of reporting period (ISO 8601 UTC), defaults to now
+
+    Returns:
+        List of dicts with hourly statistics:
+            - hour_utc: Hour bucket (YYYY-MM-DD HH:00:00)
+            - heartbeats_expected: Always 12 (one every 5 minutes)
+            - heartbeats_received: Actual heartbeat count
+            - uptime_pct: (received / expected) * 100
+            - migrations: Count of migration events
+            - obs_ok: Observations with status OK
+            - obs_missed: Observations with status MISSED_LATE
+            - obs_error: Observations with status HTTP_ERROR
+    """
+    if not start_ts_utc:
+        # Default to 24 hours ago
+        from datetime import datetime, timedelta, timezone as tz
+        start_ts_utc = (datetime.now(tz.utc) - timedelta(hours=24)).isoformat()
+
+    if not end_ts_utc:
+        end_ts_utc = utcnow_iso()
+
+    # Query for hourly statistics
+    query = """
+    WITH hours AS (
+        -- Generate hourly buckets
+        SELECT DISTINCT
+            strftime('%Y-%m-%d %H:00:00', actual_ts_utc) as hour_utc
+        FROM observations
+        WHERE actual_ts_utc >= ? AND actual_ts_utc < ?
+        UNION
+        SELECT DISTINCT
+            strftime('%Y-%m-%d %H:00:00', migration_ts_utc) as hour_utc
+        FROM migrations
+        WHERE migration_ts_utc >= ? AND migration_ts_utc < ?
+    ),
+    heartbeats AS (
+        SELECT
+            strftime('%Y-%m-%d %H:00:00', actual_ts_utc) as hour_utc,
+            COUNT(*) as received
+        FROM observations
+        WHERE horizon_label = 'heartbeat'
+          AND actual_ts_utc >= ? AND actual_ts_utc < ?
+        GROUP BY hour_utc
+    ),
+    migration_counts AS (
+        SELECT
+            strftime('%Y-%m-%d %H:00:00', migration_ts_utc) as hour_utc,
+            COUNT(*) as count
+        FROM migrations
+        WHERE migration_ts_utc >= ? AND migration_ts_utc < ?
+        GROUP BY hour_utc
+    ),
+    obs_stats AS (
+        SELECT
+            strftime('%Y-%m-%d %H:00:00', actual_ts_utc) as hour_utc,
+            SUM(CASE WHEN obs_status = 'OK' THEN 1 ELSE 0 END) as ok,
+            SUM(CASE WHEN obs_status = 'MISSED_LATE' THEN 1 ELSE 0 END) as missed,
+            SUM(CASE WHEN obs_status = 'HTTP_ERROR' THEN 1 ELSE 0 END) as error
+        FROM observations
+        WHERE horizon_label != 'heartbeat'
+          AND actual_ts_utc >= ? AND actual_ts_utc < ?
+        GROUP BY hour_utc
+    )
+    SELECT
+        h.hour_utc,
+        12 as heartbeats_expected,
+        COALESCE(hb.received, 0) as heartbeats_received,
+        ROUND(COALESCE(hb.received, 0) * 100.0 / 12, 1) as uptime_pct,
+        COALESCE(m.count, 0) as migrations,
+        COALESCE(o.ok, 0) as obs_ok,
+        COALESCE(o.missed, 0) as obs_missed,
+        COALESCE(o.error, 0) as obs_error
+    FROM hours h
+    LEFT JOIN heartbeats hb ON h.hour_utc = hb.hour_utc
+    LEFT JOIN migration_counts m ON h.hour_utc = m.hour_utc
+    LEFT JOIN obs_stats o ON h.hour_utc = o.hour_utc
+    ORDER BY h.hour_utc
+    """
+
+    cursor = conn.execute(query, (
+        start_ts_utc, end_ts_utc,  # hours from observations
+        start_ts_utc, end_ts_utc,  # hours from migrations
+        start_ts_utc, end_ts_utc,  # heartbeats
+        start_ts_utc, end_ts_utc,  # migrations count
+        start_ts_utc, end_ts_utc,  # obs_stats
+    ))
+
+    rows = cursor.fetchall()
+    return [
+        {
+            "hour_utc": row[0],
+            "heartbeats_expected": row[1],
+            "heartbeats_received": row[2],
+            "uptime_pct": row[3],
+            "migrations": row[4],
+            "obs_ok": row[5],
+            "obs_missed": row[6],
+            "obs_error": row[7],
+        }
+        for row in rows
+    ]

@@ -13,6 +13,7 @@ from typing import Protocol
 import httpx
 
 from mcbot.ratelimit import RateLimiter
+from mcbot.timeutil import utcnow_iso
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ class QuoteProber:
         Args:
             probe: Scheduled probe to execute
         """
-        probe_ts_utc = datetime.utcnow().isoformat()
+        probe_ts_utc = utcnow_iso()
 
         # SOL -> TOKEN quote
         await self._quote_swap(

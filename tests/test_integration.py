@@ -33,20 +33,22 @@ def test_migration_to_database_flow(temp_db_path):
     # Create collector
     collector = MigrationCollector(on_migration)
 
-    # Simulate migration payload
-    test_payload = {
+    # Simulate migration frame from observed PumpPortal schema
+    migration_frame = json.dumps({
+        "signature": "4UwfzBiiEnxRDrMjtaaJtx1xLAGbG7yKqitgSDsKo2bKUqZd5bxt1bMtVsc3wJVXfwe7FBwbMSMcXBidQkAjfa57",
         "mint": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
-        "symbol": "TEST",
-        "pool": "PoolAddr123",
-        "timestamp": datetime.utcnow().isoformat(),
-    }
+        "txType": "migrate",
+        "pool": "pump-amm"
+    })
 
-    # Call handler directly (websocket testing requires complex mocking)
-    collector.on_migration(test_payload)
+    # Process through message handler (as if from websocket)
+    asyncio.run(collector._handle_message(migration_frame))
 
-    # Verify callback was invoked
+    # Verify callback was invoked with transformed data
     assert len(migrations_received) == 1
     assert migrations_received[0]["mint"] == "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU"
+    assert migrations_received[0]["pool"] == "pump-amm"
+    assert "migration_ts_utc" in migrations_received[0]  # Timestamp added by handler
 
 
 def test_scheduler_queue_ordering(temp_db_path):

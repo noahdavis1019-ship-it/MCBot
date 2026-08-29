@@ -5,7 +5,6 @@ import json
 import logging
 import signal
 import sys
-from datetime import datetime
 from pathlib import Path
 
 from mcbot.collector import MigrationCollector
@@ -13,6 +12,7 @@ from mcbot.db import init_db, insert_heartbeat, insert_migration
 from mcbot.probe import QuoteProber
 from mcbot.ratelimit import RateLimiter
 from mcbot.scheduler import ObservationScheduler
+from mcbot.timeutil import utcnow_iso
 
 
 class JSONFormatter(logging.Formatter):
@@ -28,7 +28,7 @@ class JSONFormatter(logging.Formatter):
             JSON-formatted log string
         """
         log_obj = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": utcnow_iso(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -82,33 +82,32 @@ class Collector:
         """Handle migration event from websocket.
 
         Args:
-            payload: Migration event payload from PumpPortal
+            payload: Migration event dict with fields:
+                - mint: Token mint address
+                - pool: Pool identifier (e.g., "pump-amm")
+                - migration_ts_utc: ISO 8601 UTC timestamp
+                - signature: Transaction signature (for raw_payload)
         """
         try:
-            # Extract fields from payload
-            # Adjust field names based on actual PumpPortal format
+            # Extract fields from observed migration schema
             mint = payload.get("mint")
-            symbol = payload.get("symbol")
             pool = payload.get("pool")
-            timestamp = payload.get("timestamp") or payload.get("migrationTimestamp")
+            migration_ts_utc = payload.get("migration_ts_utc")
 
             if not mint:
                 self.logger.warning("Migration missing mint", extra={"payload": payload})
                 return
 
-            # Convert timestamp to ISO 8601 UTC if needed
-            if isinstance(timestamp, (int, float)):
-                migration_ts_utc = datetime.fromtimestamp(timestamp).isoformat()
-            elif isinstance(timestamp, str):
-                migration_ts_utc = timestamp
-            else:
-                migration_ts_utc = datetime.utcnow().isoformat()
+            if not migration_ts_utc:
+                self.logger.warning("Migration missing timestamp", extra={"payload": payload})
+                return
 
             # Insert migration into database
+            # Note: symbol is None - migration frames don't include token metadata
             insert_migration(
                 conn=self.db,
                 mint=mint,
-                symbol=symbol,
+                symbol=None,  # Not present in migration frames
                 pool=pool,
                 migration_ts_utc=migration_ts_utc,
                 raw_payload=json.dumps(payload),
@@ -118,7 +117,7 @@ class Collector:
                 "Migration recorded",
                 extra={
                     "mint": mint,
-                    "symbol": symbol,
+                    "pool": pool,
                     "timestamp": migration_ts_utc,
                 }
             )
